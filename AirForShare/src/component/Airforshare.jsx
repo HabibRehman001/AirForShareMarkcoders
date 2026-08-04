@@ -330,7 +330,7 @@ const Airforshare = ({ onLogout }) => {
                                 onClick={handleFileUpload}
                                 disabled={uploadingFiles}
                             >
-                                {uploadingFiles ? `Uploading… ${uploadProgress}%` : 'Upload file'}
+                                {uploadingFiles ? `Saving...` : 'Save file'}
                             </button>
                             {uploadingFiles && (
                                 <button
