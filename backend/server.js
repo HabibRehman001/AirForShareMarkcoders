@@ -378,6 +378,29 @@ app.get("/api/files/:id/download", async (req, res) => {
   }
 });
 
+app.delete("/api/files/:id", async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+    const doc = await getValidShare(ip);
+    if (!doc) return res.status(404).json({ error: "File not found or expired" });
+
+    const file = doc.files.id(req.params.id);
+    if (!file) return res.status(404).json({ error: "File not found" });
+
+    await deleteGridFsFiles([file]);
+    file.deleteOne();
+    await doc.save();
+
+    return res.status(200).json({
+      message: "File deleted",
+      files: doc.files.map(fileMeta),
+    });
+  } catch (err) {
+    console.error("Delete file error:", err);
+    return res.status(500).json({ error: "Failed to delete file" });
+  }
+});
+
 app.delete("/api/text", async (req, res) => {
   try {
     const ip = getClientIp(req);

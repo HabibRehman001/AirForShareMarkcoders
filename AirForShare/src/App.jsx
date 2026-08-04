@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import AirforShare from './component/Airforshare.jsx'
 import Login from './component/Login.jsx'
+import InstallPrompt from './component/InstallPrompt.jsx'
 import { clearToken, isLoggedIn } from './api.js'
 
 const App = () => {
@@ -17,11 +18,16 @@ const App = () => {
     setAuthed(false)
   }
 
-  if (!authed) {
-    return <Login onSuccess={() => setAuthed(true)} />
-  }
-
-  return <AirforShare onLogout={handleLogout} />
+  return (
+    <>
+      <InstallPrompt />
+      {!authed ? (
+        <Login onSuccess={() => setAuthed(true)} />
+      ) : (
+        <AirforShare onLogout={handleLogout} />
+      )}
+    </>
+  )
 }
 
 export default App

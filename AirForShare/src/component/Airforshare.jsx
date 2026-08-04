@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
+import { Delete } from 'lucide-react'
 import Alert from './alert.jsx'
 import { authFetch } from '../api.js'
 
@@ -17,6 +18,8 @@ const Airforshare = ({ onLogout }) => {
     const [alert, setAlert] = useState({ message: '', type: 'success' })
     const [uploading, setUploading] = useState(false)
     const [uploadingFiles, setUploadingFiles] = useState(false)
+    const [fileToDelete, setFileToDelete] = useState(null)
+    const [deleting, setDeleting] = useState(false)
     const fileInputRef = useRef(null)
 
     const showAlert = useCallback((message, type = 'success') => {
@@ -153,6 +156,27 @@ const Airforshare = ({ onLogout }) => {
         }
     }
 
+    const confirmDeleteFile = async () => {
+        if (!fileToDelete) return
+        setDeleting(true)
+        try {
+            const res = await authFetch(`/api/files/${fileToDelete.id}`, {
+                method: 'DELETE',
+            })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) throw new Error(data.error || 'Delete failed')
+
+            setFiles(data.files || [])
+            showAlert(`Deleted ${fileToDelete.name}`, 'success')
+            setFileToDelete(null)
+        } catch (err) {
+            console.error(err)
+            showAlert(err.message || 'Failed to delete file', 'error')
+        } finally {
+            setDeleting(false)
+        }
+    }
+
     return (
         <div className='container-wrapper'>
             <Alert
@@ -160,6 +184,35 @@ const Airforshare = ({ onLogout }) => {
                 type={alert.type}
                 onClose={closeAlert}
             />
+
+            {fileToDelete && (
+                <div className='confirm-overlay' role='dialog' aria-modal='true'>
+                    <div className='confirm-modal'>
+                        <p className='confirm-title'>Delete file?</p>
+                        <p className='confirm-text'>
+                            Confirm delete the <span>{fileToDelete.name}</span>
+                        </p>
+                        <div className='confirm-actions'>
+                            <button
+                                type='button'
+                                className='btn btn-ghost'
+                                onClick={() => setFileToDelete(null)}
+                                disabled={deleting}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type='button'
+                                className='btn btn-danger'
+                                onClick={confirmDeleteFile}
+                                disabled={deleting}
+                            >
+                                {deleting ? 'Deleting…' : 'Delete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <button type='button' className='logout-btn' onClick={onLogout}>
                 Logout
@@ -266,12 +319,22 @@ const Airforshare = ({ onLogout }) => {
                                             <span className='file-name'>{file.name}</span>
                                             <span className='file-size'>{formatBytes(file.size)}</span>
                                         </div>
-                                        <button
-                                            className='btn btn-ghost btn-small'
-                                            onClick={() => handleDownload(file)}
-                                        >
-                                            Download
-                                        </button>
+                                        <div className='file-actions'>
+                                            <button
+                                                className='btn btn-ghost btn-small'
+                                                onClick={() => handleDownload(file)}
+                                            >
+                                                Download
+                                            </button>
+                                            <button
+                                                type='button'
+                                                className='file-delete-btn'
+                                                aria-label={`Delete ${file.name}`}
+                                                onClick={() => setFileToDelete(file)}
+                                            >
+                                                <Delete size={18} />
+                                            </button>
+                                        </div>
                                     </li>
                                 ))}
                             </ul>
