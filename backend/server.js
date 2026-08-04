@@ -1,22 +1,17 @@
 import express from "express";
 import dotenv from "dotenv";
-import fs from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
+import mongoose from "mongoose";
 
 dotenv.config();
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "data");
 const PORT = process.env.PORT || 3001;
-const TTL_MS = 30 * 60 * 1000; // 30 minutes
-const CLEANUP_INTERVAL_MS = 60 * 1000; // check every 1 minute
+const MONGODB_URI = process.env.MONGODB_URI;
+const TTL_SECONDS = 30 * 60; // 30 minutes
+const TTL_MS = TTL_SECONDS * 1000;
 
 const app = express();
 
-// Needed on Render so req.ip / X-Forwarded-For are correct
 app.set("trust proxy", 1);
-
 app.use(express.json());
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
@@ -31,24 +26,26 @@ app.use((req, res, next) => {
   } else if (!origin) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
-app.get("/", (_req, res) => {
-  res.status(200).json({
-    service: "MarkCoders Share API",
-    health: "/api/health",
-    upload: "POST /api/upload",
-    text: "GET /api/text",
-  });
-});
+const shareSchema = new mongoose.Schema(
+  {
+    ip: { type: String, required: true, unique: true, index: true },
+    text: { type: String, required: true },
+    uploadedAt: { type: Date, required: true, default: Date.now },
+    expiresAt: { type: Date, required: true },
+  },
+  { versionKey: false }
+);
 
-app.get("/api/health", (_req, res) => {
-  res.status(200).json({ ok: true });
-});
+// MongoDB auto-deletes documents after expiresAt
+shareSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+const Share = mongoose.model("Share", shareSchema);
 
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
@@ -63,78 +60,23 @@ function getClientIp(req) {
   return ip;
 }
 
-function sanitizeIp(ip) {
-  return ip.replace(/:/g, "_");
-}
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    service: "MarkCoders Share API",
+    storage: "mongodb",
+    health: "/api/health",
+    upload: "POST /api/upload",
+    text: "GET /api/text",
+  });
+});
 
-function getIpFolder(ip) {
-  return path.join(DATA_DIR, sanitizeIp(ip));
-}
-
-function getDataFilePath(ip) {
-  return path.join(getIpFolder(ip), "data.json");
-}
-
-async function ensureDataDir() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-}
-
-async function deleteIpData(ip) {
-  await fs.rm(getIpFolder(ip), { recursive: true, force: true });
-}
-
-function isExpired(uploadedAt) {
-  return Date.now() - uploadedAt >= TTL_MS;
-}
-
-async function readIpData(ip) {
-  const filePath = getDataFilePath(ip);
-
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    const data = JSON.parse(raw);
-
-    if (!data?.text || !data?.uploadedAt || isExpired(data.uploadedAt)) {
-      await deleteIpData(ip);
-      return null;
-    }
-
-    return data;
-  } catch (err) {
-    if (err.code === "ENOENT") return null;
-    throw err;
-  }
-}
-
-async function cleanupExpiredData() {
-  try {
-    const entries = await fs.readdir(DATA_DIR, { withFileTypes: true });
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-
-      const folder = path.join(DATA_DIR, entry.name);
-      const filePath = path.join(folder, "data.json");
-
-      try {
-        const raw = await fs.readFile(filePath, "utf8");
-        const data = JSON.parse(raw);
-
-        if (!data?.uploadedAt || isExpired(data.uploadedAt)) {
-          await fs.rm(folder, { recursive: true, force: true });
-          console.log(`Deleted expired data for ${entry.name}`);
-        }
-      } catch {
-        // Corrupt / incomplete folder — remove it
-        await fs.rm(folder, { recursive: true, force: true });
-      }
-    }
-  } catch (err) {
-    if (err.code !== "ENOENT") {
-      console.error("Cleanup error:", err);
-    }
-  }
-}
+app.get("/api/health", (_req, res) => {
+  const dbOk = mongoose.connection.readyState === 1;
+  res.status(dbOk ? 200 : 503).json({
+    ok: dbOk,
+    db: dbOk ? "connected" : "disconnected",
+  });
+});
 
 app.post("/api/upload", async (req, res) => {
   try {
@@ -144,24 +86,27 @@ app.post("/api/upload", async (req, res) => {
     }
 
     const ip = getClientIp(req);
-    const folder = getIpFolder(ip);
-    const payload = {
-      text: text.trim(),
-      uploadedAt: Date.now(),
-      expiresInMs: TTL_MS,
-    };
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + TTL_MS);
+    const cleanText = text.trim();
 
-    await fs.mkdir(folder, { recursive: true });
-    await fs.writeFile(getDataFilePath(ip), JSON.stringify(payload, null, 2), "utf8");
-
-    // Remove legacy text.txt if present
-    await fs.rm(path.join(folder, "text.txt"), { force: true });
+    const doc = await Share.findOneAndUpdate(
+      { ip },
+      {
+        ip,
+        text: cleanText,
+        uploadedAt: now,
+        expiresAt,
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     return res.status(200).json({
       message: "Text saved",
-      ip,
-      text: payload.text,
+      ip: doc.ip,
+      text: doc.text,
       expiresInMs: TTL_MS,
+      expiresAt: doc.expiresAt,
     });
   } catch (err) {
     console.error("Upload error:", err);
@@ -172,18 +117,25 @@ app.post("/api/upload", async (req, res) => {
 app.get("/api/text", async (req, res) => {
   try {
     const ip = getClientIp(req);
-    const data = await readIpData(ip);
+    const doc = await Share.findOne({ ip });
 
-    if (!data) {
+    if (!doc) {
       return res.status(200).json({ ip, text: "", expired: false });
     }
 
-    const remainingMs = Math.max(0, TTL_MS - (Date.now() - data.uploadedAt));
+    // Safety check before Mongo TTL worker runs
+    if (doc.expiresAt.getTime() <= Date.now()) {
+      await Share.deleteOne({ _id: doc._id });
+      return res.status(200).json({ ip, text: "", expired: true });
+    }
+
+    const remainingMs = Math.max(0, doc.expiresAt.getTime() - Date.now());
 
     return res.status(200).json({
       ip,
-      text: data.text,
+      text: doc.text,
       remainingMs,
+      expiresAt: doc.expiresAt,
     });
   } catch (err) {
     console.error("Fetch error:", err);
@@ -191,17 +143,33 @@ app.get("/api/text", async (req, res) => {
   }
 });
 
-ensureDataDir()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-      console.log(`Text expires after ${TTL_MS / 60000} minutes per IP`);
-    });
+app.delete("/api/text", async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+    await Share.deleteOne({ ip });
+    return res.status(200).json({ message: "Text cleared", ip });
+  } catch (err) {
+    console.error("Delete error:", err);
+    return res.status(500).json({ error: "Failed to clear text" });
+  }
+});
 
-    cleanupExpiredData();
-    setInterval(cleanupExpiredData, CLEANUP_INTERVAL_MS);
-  })
-  .catch((err) => {
-    console.error("Failed to start server:", err);
+async function start() {
+  if (!MONGODB_URI) {
+    console.error("Missing MONGODB_URI in environment");
     process.exit(1);
+  }
+
+  await mongoose.connect(MONGODB_URI);
+  console.log("Connected to MongoDB");
+
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Text expires after ${TTL_SECONDS / 60} minutes per IP`);
   });
+}
+
+start().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});

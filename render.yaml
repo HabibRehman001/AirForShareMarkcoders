@@ -12,3 +12,5 @@ services:
         value: production
       - key: FRONTEND_URL
         sync: false
+      - key: MONGODB_URI
+        sync: false
