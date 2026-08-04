@@ -37,6 +37,15 @@ app.use((req, res, next) => {
   next();
 });
 
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    service: "MarkCoders Share API",
+    health: "/api/health",
+    upload: "POST /api/upload",
+    text: "GET /api/text",
+  });
+});
+
 app.get("/api/health", (_req, res) => {
   res.status(200).json({ ok: true });
 });
