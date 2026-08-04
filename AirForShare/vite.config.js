@@ -36,9 +36,12 @@ export default defineConfig({
       workbox: {
         navigateFallback: '/index.html',
         globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,jpeg,woff2,otf}'],
+        // Keep Workbox quiet in production builds
+        mode: 'production',
       },
+      // Disable service worker in Vite dev — removes workbox console spam on localhost
       devOptions: {
-        enabled: true,
+        enabled: false,
       },
     }),
   ],

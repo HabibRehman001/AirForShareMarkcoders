@@ -4,10 +4,8 @@ import mongoose from "mongoose";
 import multer from "multer";
 import fs from "fs";
 import fsp from "fs/promises";
-import os from "os";
+import path from "path";
 import http from "http";
-import { pipeline } from "stream/promises";
-import { GridFSBucket, ObjectId } from "mongodb";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
@@ -28,10 +26,11 @@ const TTL_SECONDS = 30 * 60;
 const TTL_MS = TTL_SECONDS * 1000;
 const MAX_FILE_SIZE = 490 * 1024 * 1024;
 const TOKEN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+/** File bytes live on disk; Mongo only stores refs (storedName). */
+const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads"));
 
 const app = express();
 const server = http.createServer(app);
-let bucket;
 let io;
 
 app.set("trust proxy", 1);
@@ -126,7 +125,8 @@ const fileMetaSchema = new mongoose.Schema(
     originalName: { type: String, required: true },
     mimetype: { type: String, required: true },
     size: { type: Number, required: true },
-    gridFsId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    /** Disk filename only — never store file bytes in Mongo. */
+    storedName: { type: String, required: true },
   },
   { _id: true }
 );
@@ -145,11 +145,30 @@ const shareSchema = new mongoose.Schema(
 shareSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 const Share = mongoose.model("Share", shareSchema);
 
+/** Persistent file/text history — refs stay until user deletes from Recent Files. */
+const recentSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true, index: true },
+    type: { type: String, enum: ["file", "text"], required: true },
+    originalName: { type: String, default: "" },
+    text: { type: String, default: "" },
+    mimetype: { type: String, default: "" },
+    size: { type: Number, default: 0 },
+    storedName: { type: String, default: "" },
+    uploadedAt: { type: Date, required: true, default: Date.now },
+  },
+  { versionKey: false }
+);
+
+recentSchema.index({ key: 1, uploadedAt: -1 });
+const RecentItem = mongoose.model("RecentItem", recentSchema);
+
 const upload = multer({
   storage: multer.diskStorage({
-    destination: os.tmpdir(),
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
     filename: (_req, file, cb) => {
-      cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      const ext = path.extname(file.originalname || "").slice(0, 32);
+      cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`);
     },
   }),
   limits: { fileSize: MAX_FILE_SIZE },
@@ -191,11 +210,14 @@ function isExpired(doc) {
 }
 
 function fileMeta(file) {
+  const id = file._id.toString();
   return {
-    id: file._id.toString(),
+    id,
     name: file.originalName,
     mimetype: file.mimetype,
     size: file.size,
+    // Public download path (auth cookie required) — Share stores ref only, not file bytes
+    url: `/api/files/${id}/download`,
   };
 }
 
@@ -217,23 +239,77 @@ function emitShareUpdate(ip, doc) {
   io.to(shareRoom(ip)).emit("share:update", sharePayload(doc, ip));
 }
 
-async function deleteGridFsFiles(files = []) {
+function recentMeta(item) {
+  const id = item._id.toString();
+  return {
+    id,
+    type: item.type,
+    name: item.type === "text" ? "Text share" : item.originalName,
+    text: item.text || "",
+    mimetype: item.mimetype || "",
+    size: item.size || 0,
+    uploadedAt: item.uploadedAt,
+    url: item.type === "file" && item.storedName ? `/api/recent/${id}/download` : null,
+  };
+}
+
+async function getRecentPayload(key = SHARE_KEY) {
+  const items = await RecentItem.find({ key }).sort({ uploadedAt: -1 }).limit(50).lean();
+  const list = items.map(recentMeta);
+  return {
+    recent: list,
+    lastUploaded: list[0] || null,
+  };
+}
+
+async function emitRecentUpdate(key = SHARE_KEY) {
+  if (!io) return;
+  const payload = await getRecentPayload(key);
+  io.to(shareRoom(key)).emit("recent:update", payload);
+}
+
+async function isStoredNameInShare(storedName) {
+  if (!storedName) return false;
+  const doc = await Share.findOne({
+    ip: SHARE_KEY,
+    "files.storedName": storedName,
+  }).select("_id");
+  return Boolean(doc);
+}
+
+async function isStoredNameInRecent(storedName) {
+  if (!storedName) return false;
+  const item = await RecentItem.findOne({
+    key: SHARE_KEY,
+    storedName,
+  }).select("_id");
+  return Boolean(item);
+}
+
+async function deleteStoredFiles(files = []) {
   await Promise.all(
     files.map(async (file) => {
+      if (!file?.storedName) return;
       try {
-        await bucket.delete(new ObjectId(String(file.gridFsId)));
+        await fsp.unlink(resolveStoredPath(file.storedName));
       } catch (err) {
-        if (err?.code !== "ENOENT" && err?.message !== "FileNotFound") {
-          console.error("GridFS delete error:", err.message);
+        if (err?.code !== "ENOENT") {
+          console.error("Disk delete error:", err.message);
         }
       }
     })
   );
 }
 
+/** Expire active share (received section) without wiping Recent File refs/disk. */
 async function deleteShare(doc) {
   if (!doc) return;
-  await deleteGridFsFiles(doc.files || []);
+  const files = doc.files || [];
+  for (const file of files) {
+    if (!file?.storedName) continue;
+    const keep = await isStoredNameInRecent(file.storedName);
+    if (!keep) await deleteStoredFiles([file]);
+  }
   await Share.deleteOne({ _id: doc._id });
 }
 
@@ -247,19 +323,23 @@ async function getValidShare(ip) {
   return doc;
 }
 
-async function saveToGridFs(file) {
-  const uploadStream = bucket.openUploadStream(file.originalname, {
-    contentType: file.mimetype || "application/octet-stream",
-    metadata: { originalName: file.originalname },
-  });
-  await pipeline(fs.createReadStream(file.path), uploadStream);
-  await fsp.unlink(file.path).catch(() => {});
+/** Build DB ref from a multer disk file (bytes already on disk). */
+function refFromUploadedFile(file) {
   return {
     originalName: file.originalname,
     mimetype: file.mimetype || "application/octet-stream",
     size: file.size,
-    gridFsId: uploadStream.id,
+    storedName: file.filename,
   };
+}
+
+function resolveStoredPath(storedName) {
+  const base = UPLOAD_DIR;
+  const full = path.resolve(UPLOAD_DIR, path.basename(String(storedName)));
+  if (!full.startsWith(base + path.sep)) {
+    throw new Error("Invalid file reference");
+  }
+  return full;
 }
 
 app.get("/", (_req, res) => {
@@ -323,14 +403,15 @@ app.post("/api/logout", (req, res) => {
 app.get("/api/me", (req, res) => {
   const token = getTokenFromRequest(req);
   if (!token) {
-    return res.status(401).json({ authenticated: false });
+    // 200 so browsers don't log a failed request when checking session on the login page
+    return res.status(200).json({ authenticated: false });
   }
   try {
     const user = jwt.verify(token, JWT_SECRET);
     return res.status(200).json({ authenticated: true, username: user.username });
   } catch {
     clearAuthCookie(res);
-    return res.status(401).json({ authenticated: false });
+    return res.status(200).json({ authenticated: false });
   }
 });
 
@@ -349,20 +430,32 @@ app.post("/api/upload", async (req, res) => {
     }
 
     const ip = getShareKey();
+    const trimmed = text.trim();
     const doc = await withShareLock(ip, async () => {
       const now = new Date();
       const expiresAt = new Date(now.getTime() + TTL_MS);
       const updated = await Share.findOneAndUpdate(
         { ip },
         {
-          $set: { text: text.trim(), uploadedAt: now, expiresAt },
+          $set: { text: trimmed, uploadedAt: now, expiresAt },
           $setOnInsert: { ip, files: [] },
         },
         { upsert: true, new: true }
       );
+
+      await RecentItem.create({
+        key: ip,
+        type: "text",
+        text: trimmed.slice(0, 500),
+        uploadedAt: now,
+      });
+
       emitShareUpdate(ip, updated);
+      await emitRecentUpdate(ip);
       return updated;
     });
+
+    const recentPayload = await getRecentPayload(ip);
 
     return res.status(200).json({
       message: "Text saved",
@@ -371,6 +464,7 @@ app.post("/api/upload", async (req, res) => {
       files: (doc.files || []).map(fileMeta),
       expiresInMs: TTL_MS,
       expiresAt: doc.expiresAt,
+      ...recentPayload,
     });
   } catch (err) {
     console.error("Upload error:", err);
@@ -414,10 +508,10 @@ app.post(
           });
         }
 
-        // Process one file at a time (queue within the request).
+        // Process one file at a time; DB only gets refs (storedName), bytes stay on disk.
         const saved = [];
         for (const file of tempFiles) {
-          saved.push(await saveToGridFs(file));
+          saved.push(refFromUploadedFile(file));
         }
 
         const now = new Date();
@@ -431,9 +525,24 @@ app.post(
           { new: true }
         );
 
+        await RecentItem.insertMany(
+          saved.map((f) => ({
+            key: ip,
+            type: "file",
+            originalName: f.originalName,
+            mimetype: f.mimetype,
+            size: f.size,
+            storedName: f.storedName,
+            uploadedAt: now,
+          }))
+        );
+
         emitShareUpdate(ip, updated);
+        await emitRecentUpdate(ip);
         return updated;
       });
+
+      const recentPayload = await getRecentPayload(ip);
 
       return res.status(200).json({
         message: "Files saved",
@@ -442,6 +551,7 @@ app.post(
         files: (doc.files || []).map(fileMeta),
         expiresInMs: TTL_MS,
         expiresAt: doc.expiresAt,
+        ...recentPayload,
       });
     } catch (err) {
       console.error("File upload error:", err);
@@ -495,18 +605,21 @@ app.get("/api/files/:id/download", async (req, res) => {
     if (!doc) return res.status(404).json({ error: "File not found or expired" });
 
     const file = doc.files.id(req.params.id);
-    if (!file) return res.status(404).json({ error: "File not found" });
+    if (!file?.storedName) return res.status(404).json({ error: "File not found" });
 
-    res.setHeader("Content-Type", file.mimetype);
+    const fullPath = resolveStoredPath(file.storedName);
+    await fsp.access(fullPath);
+
+    res.setHeader("Content-Type", file.mimetype || "application/octet-stream");
+    const safeName = String(file.originalName || "download").replace(/[^\w.\-() ]+/g, "_");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${encodeURIComponent(file.originalName)}"`
+      `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(file.originalName || "download")}`
     );
     res.setHeader("Content-Length", file.size);
+    res.setHeader("Cache-Control", "no-store");
 
-    const downloadStream = bucket.openDownloadStream(
-      new ObjectId(String(file.gridFsId))
-    );
+    const downloadStream = fs.createReadStream(fullPath);
     downloadStream.on("error", (err) => {
       console.error("Download stream error:", err);
       if (!res.headersSent) res.status(404).json({ error: "File not found" });
@@ -515,7 +628,7 @@ app.get("/api/files/:id/download", async (req, res) => {
     return downloadStream.pipe(res);
   } catch (err) {
     console.error("Download error:", err);
-    return res.status(500).json({ error: "Failed to download file" });
+    return res.status(404).json({ error: "File not found" });
   }
 });
 
@@ -529,7 +642,7 @@ app.delete("/api/files/:id", async (req, res) => {
       const file = doc.files.id(req.params.id);
       if (!file) return { status: 404, body: { error: "File not found" } };
 
-      await deleteGridFsFiles([file]);
+      // Remove from received (Share) only — Recent File refs stay until deleted there
       file.deleteOne();
       await doc.save();
 
@@ -538,7 +651,7 @@ app.delete("/api/files/:id", async (req, res) => {
       return {
         status: 200,
         body: {
-          message: "File deleted",
+          message: "File removed from received",
           text: doc.text || "",
           files: doc.files.map(fileMeta),
         },
@@ -564,7 +677,7 @@ app.delete("/api/files", async (req, res) => {
         };
       }
 
-      await deleteGridFsFiles(doc.files || []);
+      // Clear received list only; keep Recent File history + disk refs
       doc.files = [];
       await doc.save();
 
@@ -573,7 +686,7 @@ app.delete("/api/files", async (req, res) => {
       return {
         status: 200,
         body: {
-          message: "All files deleted",
+          message: "All received files cleared",
           text: doc.text || "",
           files: [],
         },
@@ -584,6 +697,85 @@ app.delete("/api/files", async (req, res) => {
   } catch (err) {
     console.error("Delete all files error:", err);
     return res.status(500).json({ error: "Failed to delete files" });
+  }
+});
+
+app.get("/api/recent", async (_req, res) => {
+  try {
+    const payload = await getRecentPayload(getShareKey());
+    return res.status(200).json(payload);
+  } catch (err) {
+    console.error("Recent list error:", err);
+    return res.status(500).json({ error: "Failed to load recent files" });
+  }
+});
+
+app.get("/api/recent/:id/download", async (req, res) => {
+  try {
+    const item = await RecentItem.findOne({
+      _id: req.params.id,
+      key: getShareKey(),
+      type: "file",
+    });
+    if (!item?.storedName) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    const fullPath = resolveStoredPath(item.storedName);
+    await fsp.access(fullPath);
+
+    res.setHeader("Content-Type", item.mimetype || "application/octet-stream");
+    const safeName = String(item.originalName || "download").replace(/[^\w.\-() ]+/g, "_");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(item.originalName || "download")}`
+    );
+    if (item.size) res.setHeader("Content-Length", item.size);
+    res.setHeader("Cache-Control", "no-store");
+
+    const downloadStream = fs.createReadStream(fullPath);
+    downloadStream.on("error", (err) => {
+      console.error("Recent download error:", err);
+      if (!res.headersSent) res.status(404).json({ error: "File not found" });
+      else res.end();
+    });
+    return downloadStream.pipe(res);
+  } catch (err) {
+    console.error("Recent download error:", err);
+    return res.status(404).json({ error: "File not found" });
+  }
+});
+
+app.delete("/api/recent/:id", async (req, res) => {
+  try {
+    const key = getShareKey();
+    const result = await withShareLock(key, async () => {
+      const item = await RecentItem.findOne({ _id: req.params.id, key });
+      if (!item) return { status: 404, body: { error: "Item not found" } };
+
+      const storedName = item.storedName;
+      await RecentItem.deleteOne({ _id: item._id });
+
+      // Temporary delete: remove history ref; delete disk only if not still in received Share
+      if (storedName) {
+        const stillShared = await isStoredNameInShare(storedName);
+        if (!stillShared) {
+          await deleteStoredFiles([{ storedName }]);
+        }
+      }
+
+      await emitRecentUpdate(key);
+      const payload = await getRecentPayload(key);
+      return {
+        status: 200,
+        body: { message: "Removed from recent files", ...payload },
+      };
+    });
+
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error("Delete recent error:", err);
+    return res.status(500).json({ error: "Failed to delete recent item" });
   }
 });
 
@@ -684,8 +876,8 @@ async function start() {
   }
 
   await mongoose.connect(MONGODB_URI);
-  bucket = new GridFSBucket(mongoose.connection.db, { bucketName: "shares" });
-  console.log("Connected to MongoDB (GridFS ready)");
+  await fsp.mkdir(UPLOAD_DIR, { recursive: true });
+  console.log(`Connected to MongoDB (file refs only) | uploads: ${UPLOAD_DIR}`);
 
   setupSocketIo();
 

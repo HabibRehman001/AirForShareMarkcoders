@@ -1,3 +1,4 @@
+import axios from 'axios'
 import { io } from 'socket.io-client'
 
 const PROD_API = 'https://airforsharemarkcoders.onrender.com'
@@ -27,47 +28,59 @@ export async function authFetch(path, options = {}) {
   return res
 }
 
-/** Upload with progress (0–100). Uses XHR because fetch has no upload progress. */
-export function uploadWithProgress(path, formData, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', apiUrl(path))
-    xhr.withCredentials = true
+/**
+ * Upload FormData with live 0–100 progress via axios onUploadProgress.
+ * Pass AbortSignal to allow cancel mid-upload.
+ */
+export async function uploadWithProgress(path, formData, onProgress, signal) {
+  try {
+    if (typeof onProgress === 'function') onProgress(0)
 
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable || typeof onProgress !== 'function') return
-      const pct = Math.min(100, Math.round((e.loaded / e.total) * 100))
-      onProgress(pct)
-    }
+    const response = await axios.post(apiUrl(path), formData, {
+      withCredentials: true,
+      signal,
+      onUploadProgress: (event) => {
+        if (typeof onProgress !== 'function') return
 
-    xhr.onload = () => {
-      if (xhr.status === 401 && path !== '/api/me' && path !== '/api/login') {
-        window.dispatchEvent(new Event('auth:logout'))
-      }
-
-      const raw = xhr.responseText || ''
-      let data = {}
-      if (raw) {
-        try {
-          data = JSON.parse(raw)
-        } catch {
-          reject(new Error(xhr.status < 400 ? 'Invalid server response' : `Upload failed (${xhr.status})`))
+        let pct = 0
+        if (typeof event.progress === 'number' && !Number.isNaN(event.progress)) {
+          pct = Math.round(event.progress * 100)
+        } else if (event.total && event.total > 0) {
+          pct = Math.round((event.loaded * 100) / event.total)
+        } else {
           return
         }
-      }
 
-      if (xhr.status >= 200 && xhr.status < 300) {
-        if (typeof onProgress === 'function') onProgress(100)
-        resolve(data)
-      } else {
-        reject(new Error(data.error || `Upload failed (${xhr.status})`))
-      }
+        // Cap at 99 until the server responds successfully
+        onProgress(Math.min(99, Math.max(0, pct)))
+      },
+    })
+
+    if (typeof onProgress === 'function') onProgress(100)
+    return response.data
+  } catch (err) {
+    if (
+      axios.isCancel?.(err) ||
+      err?.code === 'ERR_CANCELED' ||
+      err?.name === 'CanceledError' ||
+      err?.name === 'AbortError'
+    ) {
+      const cancelErr = new Error('Upload cancelled')
+      cancelErr.cancelled = true
+      throw cancelErr
     }
 
-    xhr.onerror = () => reject(new Error('Network error during upload'))
-    xhr.onabort = () => reject(new Error('Upload cancelled'))
-    xhr.send(formData)
-  })
+    const status = err?.response?.status
+    if (status === 401 && path !== '/api/me' && path !== '/api/login') {
+      window.dispatchEvent(new Event('auth:logout'))
+    }
+
+    const message =
+      err?.response?.data?.error ||
+      err?.message ||
+      'Failed to upload file'
+    throw new Error(message)
+  }
 }
 
 export async function checkAuth() {
@@ -90,28 +103,73 @@ export async function logoutRequest() {
 }
 
 /** Live share updates over Socket.IO (cookie auth). */
-export function connectShareSocket({ onUpdate, onAuthError } = {}) {
-  const socket = io(API_BASE || undefined, {
-    path: '/socket.io',
-    withCredentials: true,
-    transports: ['websocket', 'polling'],
-    autoConnect: true,
-  })
+let shareSocket = null
 
-  socket.on('connect', () => {
-    socket.emit('share:sync')
-  })
+export function connectShareSocket({ onUpdate, onRecentUpdate, onAuthError } = {}) {
+  // Reuse one socket across React Strict Mode remounts (avoids WS closed warning)
+  if (!shareSocket) {
+    shareSocket = io(API_BASE || undefined, {
+      path: '/socket.io',
+      withCredentials: true,
+      // Polling first is more reliable through the Vite proxy; upgrades to WS after
+      transports: ['polling', 'websocket'],
+      autoConnect: true,
+      reconnection: true,
+      reconnectionAttempts: 8,
+    })
+  }
 
-  socket.on('share:update', (payload) => {
+  const socket = shareSocket
+
+  const handleUpdate = (payload) => {
     if (typeof onUpdate === 'function') onUpdate(payload)
-  })
+  }
 
-  socket.on('connect_error', (err) => {
+  const handleConnect = () => {
+    socket.emit('share:sync')
+  }
+
+  const handleConnectError = (err) => {
     const message = err?.message || ''
     if (/auth/i.test(message) && typeof onAuthError === 'function') {
       onAuthError(err)
     }
-  })
+  }
 
-  return socket
+  socket.on('share:update', handleUpdate)
+  socket.on('connect', handleConnect)
+  socket.on('connect_error', handleConnectError)
+
+  const handleRecent = (payload) => {
+    if (typeof onRecentUpdate === 'function') onRecentUpdate(payload)
+  }
+  socket.on('recent:update', handleRecent)
+
+  if (socket.connected) {
+    socket.emit('share:sync')
+  }
+
+  return {
+    disconnect() {
+      socket.off('share:update', handleUpdate)
+      socket.off('connect', handleConnect)
+      socket.off('connect_error', handleConnectError)
+      socket.off('recent:update', handleRecent)
+    },
+    forceDisconnect() {
+      socket.off('share:update', handleUpdate)
+      socket.off('connect', handleConnect)
+      socket.off('connect_error', handleConnectError)
+      socket.off('recent:update', handleRecent)
+      socket.disconnect()
+      shareSocket = null
+    },
+  }
+}
+
+export function disconnectShareSocket() {
+  if (!shareSocket) return
+  shareSocket.removeAllListeners()
+  shareSocket.disconnect()
+  shareSocket = null
 }

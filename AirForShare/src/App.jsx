@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import AirforShare from './component/Airforshare.jsx'
 import Login from './component/Login.jsx'
 import InstallPrompt from './component/InstallPrompt.jsx'
-import { checkAuth, logoutRequest } from './api.js'
+import { checkAuth, logoutRequest, disconnectShareSocket } from './api.js'
 
 const App = () => {
   const [authed, setAuthed] = useState(false)
@@ -21,12 +21,16 @@ const App = () => {
   }, [])
 
   useEffect(() => {
-    const onLogout = () => setAuthed(false)
+    const onLogout = () => {
+      disconnectShareSocket()
+      setAuthed(false)
+    }
     window.addEventListener('auth:logout', onLogout)
     return () => window.removeEventListener('auth:logout', onLogout)
   }, [])
 
   const handleLogout = async () => {
+    disconnectShareSocket()
     await logoutRequest()
     setAuthed(false)
   }

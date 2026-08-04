@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Delete } from 'lucide-react'
 import Alert from './alert.jsx'
-import { authFetch, uploadWithProgress, connectShareSocket } from '../api.js'
+import { authFetch, uploadWithProgress, connectShareSocket, apiUrl } from '../api.js'
 
 function formatBytes(bytes) {
     if (!bytes && bytes !== 0) return ''
@@ -20,9 +20,19 @@ const Airforshare = ({ onLogout }) => {
     const [uploadingFiles, setUploadingFiles] = useState(false)
     const [uploadProgress, setUploadProgress] = useState(0)
     const [fileToDelete, setFileToDelete] = useState(null)
+    const [recentToDelete, setRecentToDelete] = useState(null)
     const [deleteAllOpen, setDeleteAllOpen] = useState(false)
     const [deleting, setDeleting] = useState(false)
+    const [recent, setRecent] = useState([])
+    const [lastUploaded, setLastUploaded] = useState(null)
     const fileInputRef = useRef(null)
+    const uploadAbortRef = useRef(null)
+
+    const applyRecent = useCallback((payload) => {
+        if (!payload) return
+        setRecent(payload.recent || [])
+        setLastUploaded(payload.lastUploaded || null)
+    }, [])
 
     const showAlert = useCallback((message, type = 'success') => {
         setAlert({ message, type })
@@ -44,14 +54,26 @@ const Airforshare = ({ onLogout }) => {
         }
     }, [])
 
+    const fetchRecent = useCallback(async () => {
+        try {
+            const res = await authFetch('/api/recent')
+            if (!res.ok) throw new Error('Failed to fetch recent')
+            applyRecent(await res.json())
+        } catch {
+            // silent
+        }
+    }, [applyRecent])
+
     useEffect(() => {
         fetchShared()
+        fetchRecent()
 
         const socket = connectShareSocket({
             onUpdate: (data) => {
                 setSharedText(data?.text || '')
                 setFiles(data?.files || [])
             },
+            onRecentUpdate: applyRecent,
             onAuthError: () => {
                 window.dispatchEvent(new Event('auth:logout'))
             },
@@ -59,8 +81,9 @@ const Airforshare = ({ onLogout }) => {
 
         return () => {
             socket.disconnect()
+            uploadAbortRef.current?.abort()
         }
-    }, [fetchShared])
+    }, [fetchShared, fetchRecent, applyRecent])
 
     const handleUpload = async () => {
         if (!text.trim()) {
@@ -80,6 +103,7 @@ const Airforshare = ({ onLogout }) => {
 
             setSharedText(data.text)
             setFiles(data.files || [])
+            applyRecent(data)
             setText('')
             showAlert('Text uploaded successfully', 'success')
         } catch (err) {
@@ -94,6 +118,11 @@ const Airforshare = ({ onLogout }) => {
         setSelectedFiles(Array.from(e.target.files || []))
     }
 
+    const handleCancelUpload = () => {
+        if (!uploadingFiles) return
+        uploadAbortRef.current?.abort()
+    }
+
     const handleFileUpload = async () => {
         if (!selectedFiles.length) {
             showAlert('Please choose a file to upload', 'warning')
@@ -106,24 +135,37 @@ const Airforshare = ({ onLogout }) => {
             return
         }
 
+        const controller = new AbortController()
+        uploadAbortRef.current = controller
         setUploadingFiles(true)
         setUploadProgress(0)
         try {
             const formData = new FormData()
             selectedFiles.forEach((file) => formData.append('files', file))
 
-            const data = await uploadWithProgress('/api/upload-file', formData, setUploadProgress)
+            const data = await uploadWithProgress(
+                '/api/upload-file',
+                formData,
+                (pct) => setUploadProgress(pct),
+                controller.signal
+            )
 
             setUploadProgress(100)
             setFiles(data.files || [])
+            applyRecent(data)
             setSelectedFiles([])
             if (fileInputRef.current) fileInputRef.current.value = ''
             showAlert('File uploaded successfully', 'success')
-            await new Promise((r) => setTimeout(r, 400))
+            await new Promise((r) => setTimeout(r, 450))
         } catch (err) {
-            console.error(err)
-            showAlert(err.message || 'Failed to upload file', 'error')
+            if (err?.cancelled) {
+                showAlert('Upload cancelled', 'warning')
+            } else {
+                console.error(err)
+                showAlert(err.message || 'Failed to upload file', 'error')
+            }
         } finally {
+            uploadAbortRef.current = null
             setUploadingFiles(false)
             setUploadProgress(0)
         }
@@ -143,20 +185,15 @@ const Airforshare = ({ onLogout }) => {
         }
     }
 
-    const handleDownload = async (file) => {
-        try {
-            const res = await authFetch(`/api/files/${file.id}/download`)
-            if (!res.ok) throw new Error('Download failed')
-            const blob = await res.blob()
-            const url = URL.createObjectURL(blob)
-            const a = document.createElement('a')
-            a.href = url
-            a.download = file.name
-            a.click()
-            URL.revokeObjectURL(url)
-        } catch {
-            showAlert('Failed to download file', 'error')
-        }
+    const handleDownload = (file) => {
+        const href = apiUrl(file.url || `/api/files/${file.id}/download`)
+        const a = document.createElement('a')
+        a.href = href
+        a.rel = 'noopener'
+        a.download = file.name || 'download'
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
     }
 
     const confirmDeleteFile = async () => {
@@ -170,11 +207,32 @@ const Airforshare = ({ onLogout }) => {
             if (!res.ok) throw new Error(data.error || 'Delete failed')
 
             setFiles(data.files || [])
-            showAlert(`Deleted ${fileToDelete.name}`, 'success')
+            showAlert(`Removed from received: ${fileToDelete.name}`, 'success')
             setFileToDelete(null)
         } catch (err) {
             console.error(err)
             showAlert(err.message || 'Failed to delete file', 'error')
+        } finally {
+            setDeleting(false)
+        }
+    }
+
+    const confirmDeleteRecent = async () => {
+        if (!recentToDelete) return
+        setDeleting(true)
+        try {
+            const res = await authFetch(`/api/recent/${recentToDelete.id}`, {
+                method: 'DELETE',
+            })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) throw new Error(data.error || 'Delete failed')
+
+            applyRecent(data)
+            showAlert('Removed from recent files', 'success')
+            setRecentToDelete(null)
+        } catch (err) {
+            console.error(err)
+            showAlert(err.message || 'Failed to delete recent item', 'error')
         } finally {
             setDeleting(false)
         }
@@ -188,13 +246,22 @@ const Airforshare = ({ onLogout }) => {
             if (!res.ok) throw new Error(data.error || 'Delete failed')
 
             setFiles([])
-            showAlert('All files deleted', 'success')
+            showAlert('Received files cleared', 'success')
             setDeleteAllOpen(false)
         } catch (err) {
             console.error(err)
             showAlert(err.message || 'Failed to delete files', 'error')
         } finally {
             setDeleting(false)
+        }
+    }
+
+    const formatWhen = (value) => {
+        if (!value) return ''
+        try {
+            return new Date(value).toLocaleString()
+        } catch {
+            return ''
         }
     }
 
@@ -209,9 +276,10 @@ const Airforshare = ({ onLogout }) => {
             {fileToDelete && (
                 <div className='confirm-overlay' role='dialog' aria-modal='true'>
                     <div className='confirm-modal'>
-                        <p className='confirm-title'>Delete file?</p>
+                        <p className='confirm-title'>Remove from received?</p>
                         <p className='confirm-text'>
-                            Confirm delete the <span>{fileToDelete.name}</span>
+                            Remove <span>{fileToDelete.name}</span> from received files
+                            (it stays in Recent Files until deleted there)
                         </p>
                         <div className='confirm-actions'>
                             <button
@@ -228,6 +296,36 @@ const Airforshare = ({ onLogout }) => {
                                 onClick={confirmDeleteFile}
                                 disabled={deleting}
                             >
+                                {deleting ? 'Deleting…' : 'Remove'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {recentToDelete && (
+                <div className='confirm-overlay' role='dialog' aria-modal='true'>
+                    <div className='confirm-modal'>
+                        <p className='confirm-title'>Delete from recent?</p>
+                        <p className='confirm-text'>
+                            Confirm delete <span>{recentToDelete.name}</span> from Recent Files shared.
+                            This removes the saved file reference.
+                        </p>
+                        <div className='confirm-actions'>
+                            <button
+                                type='button'
+                                className='btn btn-ghost'
+                                onClick={() => setRecentToDelete(null)}
+                                disabled={deleting}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type='button'
+                                className='btn btn-danger'
+                                onClick={confirmDeleteRecent}
+                                disabled={deleting}
+                            >
                                 {deleting ? 'Deleting…' : 'Delete'}
                             </button>
                         </div>
@@ -238,9 +336,9 @@ const Airforshare = ({ onLogout }) => {
             {deleteAllOpen && (
                 <div className='confirm-overlay' role='dialog' aria-modal='true'>
                     <div className='confirm-modal'>
-                        <p className='confirm-title'>Delete all files?</p>
+                        <p className='confirm-title'>Clear received files?</p>
                         <p className='confirm-text'>
-                            Confirm delete all <span>{files.length}</span> uploaded file(s)
+                            Clear all <span>{files.length}</span> received file(s). Recent history is kept.
                         </p>
                         <div className='confirm-actions'>
                             <button
@@ -257,7 +355,7 @@ const Airforshare = ({ onLogout }) => {
                                 onClick={confirmDeleteAll}
                                 disabled={deleting}
                             >
-                                {deleting ? 'Deleting…' : 'Delete all'}
+                                {deleting ? 'Deleting…' : 'Clear all'}
                             </button>
                         </div>
                     </div>
@@ -269,17 +367,91 @@ const Airforshare = ({ onLogout }) => {
             </button>
 
             <div className='container'>
-                <div className='content'>
-                    <img
-                        className='brand-logo'
-                        src='/logo.jpg'
-                        alt='MarkCoders'
-                    />
-                    <h1>MarkCoders.Share</h1>
-                    <span className='by'>
-                      Share your text and files
-                      <span className='without'>Without any external connections</span>
-                    </span>
+                <div className='brand-column'>
+                    <div className='content'>
+                        <img
+                            className='brand-logo'
+                            src='/logo.jpg'
+                            alt='MarkCoders'
+                        />
+                        <h1>MarkCoders.Share</h1>
+                        <span className='by'>
+                          Share your text and files
+                          <span className='without'>Without any external connections</span>
+                        </span>
+                    </div>
+
+                    <div className='history-panel'>
+                        <section className='history-block'>
+                            <h2 className='history-title'>Last uploaded</h2>
+                            {!lastUploaded ? (
+                                <p className='history-empty'>Nothing uploaded yet</p>
+                            ) : (
+                                <div className='last-uploaded'>
+                                    <span className='last-uploaded__type'>
+                                        {lastUploaded.type === 'text' ? 'Text' : 'File'}
+                                    </span>
+                                    <p className='last-uploaded__name'>
+                                        {lastUploaded.type === 'text'
+                                            ? lastUploaded.text
+                                            : lastUploaded.name}
+                                    </p>
+                                    <span className='last-uploaded__time'>
+                                        {formatWhen(lastUploaded.uploadedAt)}
+                                    </span>
+                                </div>
+                            )}
+                        </section>
+
+                        <section className='history-block history-block--grow'>
+                            <h2 className='history-title'>Recent Files shared</h2>
+                            {recent.length === 0 ? (
+                                <p className='history-empty'>No recent files yet</p>
+                            ) : (
+                                <ul className='recent-list'>
+                                    {recent.map((item) => (
+                                        <li key={item.id} className='recent-item'>
+                                            <div className='recent-info'>
+                                                <span className='recent-name'>
+                                                    {item.type === 'text'
+                                                        ? item.text || 'Text share'
+                                                        : item.name}
+                                                </span>
+                                                <span className='recent-meta'>
+                                                    {item.type === 'file'
+                                                        ? formatBytes(item.size)
+                                                        : 'Text'}
+                                                    {item.uploadedAt
+                                                        ? ` · ${formatWhen(item.uploadedAt)}`
+                                                        : ''}
+                                                </span>
+                                            </div>
+                                            <div className='recent-actions'>
+                                                {item.type === 'file' && item.url && (
+                                                    <button
+                                                        style={{ cursor: 'pointer',color:'black' }}
+                                                        type='button'
+                                                        className='btn btn-ghost btn-small'
+                                                        onClick={() => handleDownload(item)}
+                                                    >
+                                                        Download
+                                                    </button>
+                                                )}
+                                                <button
+                                                    type='button'
+                                                    className='file-delete-btn'
+                                                    aria-label={`Delete ${item.name}`}
+                                                    onClick={() => setRecentToDelete(item)}
+                                                >
+                                                    <Delete size={18} />
+                                                </button>
+                                            </div>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </section>
+                    </div>
                 </div>
             </div>
 
@@ -304,7 +476,7 @@ const Airforshare = ({ onLogout }) => {
                                 onClick={handleUpload}
                                 disabled={uploading}
                             >
-                                {uploading ? 'Uploading…' : 'Upload'}
+                                {uploading ? 'Saving' : 'save'}
                             </button>
                         </div>
                     </div>
@@ -328,14 +500,25 @@ const Airforshare = ({ onLogout }) => {
                                 onClick={handleFileUpload}
                                 disabled={uploadingFiles}
                             >
-                                {uploadingFiles ? 'Uploading…' : 'Upload file'}
+                                {uploadingFiles ? `Uploading… ${uploadProgress}%` : 'Upload file'}
                             </button>
+                            {uploadingFiles && (
+                                <button
+                                    type='button'
+                                    className='btn btn-ghost upload-cancel-btn'
+                                    onClick={handleCancelUpload}
+                                >
+                                    Cancel
+                                </button>
+                            )}
                         </div>
                         {(selectedFiles.length > 0 || uploadingFiles) && (
                             <div className='file-hint-wrap'>
                                 <p className='file-hint'>
                                     {uploadingFiles
-                                        ? `Uploading… ${uploadProgress}%`
+                                        ? uploadProgress >= 100
+                                            ? 'Upload complete'
+                                            : `Uploading… ${uploadProgress}%`
                                         : `${selectedFiles.length} file(s) selected`}
                                 </p>
                                 {uploadingFiles && (
@@ -345,10 +528,11 @@ const Airforshare = ({ onLogout }) => {
                                         aria-valuemin={0}
                                         aria-valuemax={100}
                                         aria-valuenow={uploadProgress}
+                                        aria-label='Upload progress'
                                     >
                                         <div
                                             className='upload-progress__bar'
-                                            style={{ width: `${uploadProgress}%` }}
+                                            style={{ transform: `scaleX(${uploadProgress / 100})` }}
                                         />
                                     </div>
                                 )}
