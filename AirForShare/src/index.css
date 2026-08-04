@@ -211,6 +211,85 @@ body {
   cursor: not-allowed;
 }
 
+.file-row {
+  align-items: center;
+}
+
+.file-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #2a2a2a;
+  background: #0c0c0c;
+  color: #ccc;
+  font-family: "Neutral Face", sans-serif;
+  font-size: 0.75rem;
+  border-radius: 2px;
+}
+
+.file-input::file-selector-button {
+  margin-right: 12px;
+  padding: 8px 12px;
+  border: 1px solid #3a3a3a;
+  background: #1a1a1a;
+  color: #fff;
+  font-family: "Neutral Face", sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.file-hint,
+.file-empty {
+  color: #666;
+  font-size: 0.75rem;
+}
+
+.file-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #2a2a2a;
+  background: #0c0c0c;
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.file-name {
+  color: #fff;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size {
+  color: #777;
+  font-size: 0.7rem;
+}
+
+.btn-small {
+  padding: 10px 12px;
+  font-size: 0.65rem;
+  width: auto;
+  align-self: auto;
+}
+
 /* Alerts */
 .alert {
   position: fixed;
