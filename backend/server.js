@@ -5,11 +5,13 @@ import multer from "multer";
 import fs from "fs";
 import fsp from "fs/promises";
 import os from "os";
+import http from "http";
 import { pipeline } from "stream/promises";
 import { GridFSBucket, ObjectId } from "mongodb";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
+import { Server } from "socket.io";
 
 dotenv.config();
 
@@ -20,13 +22,17 @@ const ACCOUNT_PASS = process.env.ACCOUNT_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
 const IS_PROD = process.env.NODE_ENV === "production";
 const AUTH_COOKIE = "markcoders_token";
+/** One shared clipboard for all logged-in MarkCoders devices (not per client IP). */
+const SHARE_KEY = "markcoders";
 const TTL_SECONDS = 30 * 60;
 const TTL_MS = TTL_SECONDS * 1000;
 const MAX_FILE_SIZE = 490 * 1024 * 1024;
 const TOKEN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 const app = express();
+const server = http.createServer(app);
 let bucket;
+let io;
 
 app.set("trust proxy", 1);
 app.use(express.json());
@@ -50,6 +56,26 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+
+function parseCookies(header = "") {
+  return Object.fromEntries(
+    String(header)
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const eq = part.indexOf("=");
+        if (eq === -1) return [part, ""];
+        const key = part.slice(0, eq);
+        const value = part.slice(eq + 1);
+        try {
+          return [key, decodeURIComponent(value)];
+        } catch {
+          return [key, value];
+        }
+      })
+  );
+}
 
 function getTokenFromRequest(req) {
   const header = req.headers.authorization || "";
@@ -89,6 +115,10 @@ function clearAuthCookie(res) {
     sameSite: IS_PROD ? "none" : "lax",
     path: "/",
   });
+}
+
+function shareRoom(ip) {
+  return `share:${ip}`;
 }
 
 const fileMetaSchema = new mongoose.Schema(
@@ -134,6 +164,28 @@ function getClientIp(req) {
   return ip;
 }
 
+function getShareKey() {
+  return SHARE_KEY;
+}
+
+/** Serialize mutations per share key so concurrent uploads/deletes can't clobber each other. */
+const shareQueues = new Map();
+
+function withShareLock(key, task) {
+  const prev = shareQueues.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(task);
+  // Keep the chain going even if this task fails; clear map when this is the last waiter.
+  const tail = run.then(
+    () => {},
+    () => {}
+  );
+  shareQueues.set(key, tail);
+  tail.finally(() => {
+    if (shareQueues.get(key) === tail) shareQueues.delete(key);
+  });
+  return run;
+}
+
 function isExpired(doc) {
   return !doc || doc.expiresAt.getTime() <= Date.now();
 }
@@ -147,10 +199,22 @@ function fileMeta(file) {
   };
 }
 
-function refreshExpiry(doc) {
-  const now = new Date();
-  doc.uploadedAt = now;
-  doc.expiresAt = new Date(now.getTime() + TTL_MS);
+function sharePayload(doc, ip) {
+  if (!doc) {
+    return { ip, text: "", files: [], expired: false };
+  }
+  return {
+    ip: doc.ip || ip,
+    text: doc.text || "",
+    files: (doc.files || []).map(fileMeta),
+    remainingMs: Math.max(0, doc.expiresAt.getTime() - Date.now()),
+    expiresAt: doc.expiresAt,
+  };
+}
+
+function emitShareUpdate(ip, doc) {
+  if (!io) return;
+  io.to(shareRoom(ip)).emit("share:update", sharePayload(doc, ip));
 }
 
 async function deleteGridFsFiles(files = []) {
@@ -284,17 +348,21 @@ app.post("/api/upload", async (req, res) => {
       return res.status(400).json({ error: "Text is required" });
     }
 
-    const ip = getClientIp(req);
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + TTL_MS);
-    const doc = await Share.findOneAndUpdate(
-      { ip },
-      {
-        $set: { text: text.trim(), uploadedAt: now, expiresAt },
-        $setOnInsert: { ip, files: [] },
-      },
-      { upsert: true, new: true }
-    );
+    const ip = getShareKey();
+    const doc = await withShareLock(ip, async () => {
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + TTL_MS);
+      const updated = await Share.findOneAndUpdate(
+        { ip },
+        {
+          $set: { text: text.trim(), uploadedAt: now, expiresAt },
+          $setOnInsert: { ip, files: [] },
+        },
+        { upsert: true, new: true }
+      );
+      emitShareUpdate(ip, updated);
+      return updated;
+    });
 
     return res.status(200).json({
       message: "Text saved",
@@ -328,29 +396,50 @@ app.post(
         return res.status(400).json({ error: "At least one file is required" });
       }
 
-      const ip = getClientIp(req);
-      let doc = await Share.findOne({ ip });
-      if (!doc || isExpired(doc)) {
-        if (doc) await deleteShare(doc);
-        doc = new Share({
-          ip,
-          text: "",
-          files: [],
-          uploadedAt: new Date(),
-          expiresAt: new Date(Date.now() + TTL_MS),
-        });
-      }
+      const ip = getShareKey();
+      const doc = await withShareLock(ip, async () => {
+        let existing = await Share.findOne({ ip });
+        if (existing && isExpired(existing)) {
+          await deleteShare(existing);
+          existing = null;
+        }
 
-      const saved = [];
-      for (const file of tempFiles) saved.push(await saveToGridFs(file));
-      doc.files.push(...saved);
-      refreshExpiry(doc);
-      await doc.save();
+        if (!existing) {
+          existing = await Share.create({
+            ip,
+            text: "",
+            files: [],
+            uploadedAt: new Date(),
+            expiresAt: new Date(Date.now() + TTL_MS),
+          });
+        }
+
+        // Process one file at a time (queue within the request).
+        const saved = [];
+        for (const file of tempFiles) {
+          saved.push(await saveToGridFs(file));
+        }
+
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + TTL_MS);
+        const updated = await Share.findOneAndUpdate(
+          { ip },
+          {
+            $push: { files: { $each: saved } },
+            $set: { uploadedAt: now, expiresAt },
+          },
+          { new: true }
+        );
+
+        emitShareUpdate(ip, updated);
+        return updated;
+      });
 
       return res.status(200).json({
         message: "Files saved",
         ip: doc.ip,
-        files: doc.files.map(fileMeta),
+        text: doc.text || "",
+        files: (doc.files || []).map(fileMeta),
         expiresInMs: TTL_MS,
         expiresAt: doc.expiresAt,
       });
@@ -364,7 +453,7 @@ app.post(
 
 app.get("/api/text", async (req, res) => {
   try {
-    const ip = getClientIp(req);
+    const ip = getShareKey();
     const doc = await getValidShare(ip);
     if (!doc) {
       return res.status(200).json({ ip, text: "", files: [], expired: false });
@@ -384,7 +473,7 @@ app.get("/api/text", async (req, res) => {
 
 app.get("/api/files", async (req, res) => {
   try {
-    const ip = getClientIp(req);
+    const ip = getShareKey();
     const doc = await getValidShare(ip);
     if (!doc) return res.status(200).json({ ip, files: [] });
     return res.status(200).json({
@@ -401,7 +490,7 @@ app.get("/api/files", async (req, res) => {
 
 app.get("/api/files/:id/download", async (req, res) => {
   try {
-    const ip = getClientIp(req);
+    const ip = getShareKey();
     const doc = await getValidShare(ip);
     if (!doc) return res.status(404).json({ error: "File not found or expired" });
 
@@ -432,21 +521,31 @@ app.get("/api/files/:id/download", async (req, res) => {
 
 app.delete("/api/files/:id", async (req, res) => {
   try {
-    const ip = getClientIp(req);
-    const doc = await getValidShare(ip);
-    if (!doc) return res.status(404).json({ error: "File not found or expired" });
+    const ip = getShareKey();
+    const result = await withShareLock(ip, async () => {
+      const doc = await getValidShare(ip);
+      if (!doc) return { status: 404, body: { error: "File not found or expired" } };
 
-    const file = doc.files.id(req.params.id);
-    if (!file) return res.status(404).json({ error: "File not found" });
+      const file = doc.files.id(req.params.id);
+      if (!file) return { status: 404, body: { error: "File not found" } };
 
-    await deleteGridFsFiles([file]);
-    file.deleteOne();
-    await doc.save();
+      await deleteGridFsFiles([file]);
+      file.deleteOne();
+      await doc.save();
 
-    return res.status(200).json({
-      message: "File deleted",
-      files: doc.files.map(fileMeta),
+      emitShareUpdate(ip, doc);
+
+      return {
+        status: 200,
+        body: {
+          message: "File deleted",
+          text: doc.text || "",
+          files: doc.files.map(fileMeta),
+        },
+      };
     });
+
+    return res.status(result.status).json(result.body);
   } catch (err) {
     console.error("Delete file error:", err);
     return res.status(500).json({ error: "Failed to delete file" });
@@ -455,20 +554,33 @@ app.delete("/api/files/:id", async (req, res) => {
 
 app.delete("/api/files", async (req, res) => {
   try {
-    const ip = getClientIp(req);
-    const doc = await getValidShare(ip);
-    if (!doc) {
-      return res.status(200).json({ message: "No files to delete", files: [] });
-    }
+    const ip = getShareKey();
+    const result = await withShareLock(ip, async () => {
+      const doc = await getValidShare(ip);
+      if (!doc) {
+        return {
+          status: 200,
+          body: { message: "No files to delete", text: "", files: [] },
+        };
+      }
 
-    await deleteGridFsFiles(doc.files || []);
-    doc.files = [];
-    await doc.save();
+      await deleteGridFsFiles(doc.files || []);
+      doc.files = [];
+      await doc.save();
 
-    return res.status(200).json({
-      message: "All files deleted",
-      files: [],
+      emitShareUpdate(ip, doc);
+
+      return {
+        status: 200,
+        body: {
+          message: "All files deleted",
+          text: doc.text || "",
+          files: [],
+        },
+      };
     });
+
+    return res.status(result.status).json(result.body);
   } catch (err) {
     console.error("Delete all files error:", err);
     return res.status(500).json({ error: "Failed to delete files" });
@@ -477,10 +589,13 @@ app.delete("/api/files", async (req, res) => {
 
 app.delete("/api/text", async (req, res) => {
   try {
-    const ip = getClientIp(req);
-    const doc = await Share.findOne({ ip });
-    await deleteShare(doc);
-    return res.status(200).json({ message: "Share cleared", ip });
+    const ip = getShareKey();
+    await withShareLock(ip, async () => {
+      const doc = await Share.findOne({ ip });
+      await deleteShare(doc);
+      emitShareUpdate(ip, null);
+    });
+    return res.status(200).json({ message: "Share cleared", ip, text: "", files: [] });
   } catch (err) {
     console.error("Delete error:", err);
     return res.status(500).json({ error: "Failed to clear share" });
@@ -491,12 +606,71 @@ async function cleanupExpiredShares() {
   try {
     const expired = await Share.find({ expiresAt: { $lte: new Date() } });
     for (const doc of expired) {
-      await deleteShare(doc);
-      console.log(`Deleted expired share for ${doc.ip}`);
+      const ip = doc.ip;
+      await withShareLock(ip, async () => {
+        const fresh = await Share.findById(doc._id);
+        if (!fresh || fresh.expiresAt.getTime() > Date.now()) return;
+        await deleteShare(fresh);
+        emitShareUpdate(ip, null);
+        console.log(`Deleted expired share for ${ip}`);
+      });
     }
   } catch (err) {
     console.error("Cleanup error:", err);
   }
+}
+
+function getSocketIp(socket) {
+  const forwarded = socket.handshake.headers["x-forwarded-for"];
+  let ip = forwarded
+    ? String(forwarded).split(",")[0].trim()
+    : socket.handshake.address || "unknown";
+  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
+  return ip;
+}
+
+function setupSocketIo() {
+  io = new Server(server, {
+    cors: {
+      origin: allowedOrigins.length ? allowedOrigins : true,
+      credentials: true,
+    },
+  });
+
+  io.use((socket, next) => {
+    try {
+      const cookies = parseCookies(socket.handshake.headers.cookie || "");
+      const authHeader = socket.handshake.headers.authorization || "";
+      const [type, bearer] = String(authHeader).split(" ");
+      const token =
+        (type === "Bearer" && bearer) ||
+        cookies[AUTH_COOKIE] ||
+        socket.handshake.auth?.token ||
+        "";
+
+      if (!token) return next(new Error("Authentication required"));
+      socket.user = jwt.verify(token, JWT_SECRET);
+      socket.shareKey = getShareKey();
+      socket.clientIp = getSocketIp(socket);
+      return next();
+    } catch {
+      return next(new Error("Invalid or expired token"));
+    }
+  });
+
+  io.on("connection", (socket) => {
+    const room = shareRoom(socket.shareKey);
+    socket.join(room);
+
+    socket.on("share:sync", async () => {
+      try {
+        const doc = await getValidShare(socket.shareKey);
+        socket.emit("share:update", sharePayload(doc, socket.shareKey));
+      } catch (err) {
+        console.error("Socket sync error:", err);
+      }
+    });
+  });
 }
 
 async function start() {
@@ -513,9 +687,11 @@ async function start() {
   bucket = new GridFSBucket(mongoose.connection.db, { bucketName: "shares" });
   console.log("Connected to MongoDB (GridFS ready)");
 
-  app.listen(PORT, () => {
+  setupSocketIo();
+
+  server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Auth user: ${ADMIN_USERNAME} | Max file: 490MB`);
+    console.log(`Auth user: ${ADMIN_USERNAME} | Max file: 490MB | Socket.IO enabled`);
   });
 
   cleanupExpiredShares();

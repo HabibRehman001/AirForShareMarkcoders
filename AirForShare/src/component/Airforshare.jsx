@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Delete } from 'lucide-react'
 import Alert from './alert.jsx'
-import { authFetch, uploadWithProgress } from '../api.js'
+import { authFetch, uploadWithProgress, connectShareSocket } from '../api.js'
 
 function formatBytes(bytes) {
     if (!bytes && bytes !== 0) return ''
@@ -40,14 +40,26 @@ const Airforshare = ({ onLogout }) => {
             setSharedText(data.text || '')
             setFiles(data.files || [])
         } catch {
-            // silent on poll failures
+            // silent on initial load failures
         }
     }, [])
 
     useEffect(() => {
         fetchShared()
-        const interval = setInterval(fetchShared, 3000)
-        return () => clearInterval(interval)
+
+        const socket = connectShareSocket({
+            onUpdate: (data) => {
+                setSharedText(data?.text || '')
+                setFiles(data?.files || [])
+            },
+            onAuthError: () => {
+                window.dispatchEvent(new Event('auth:logout'))
+            },
+        })
+
+        return () => {
+            socket.disconnect()
+        }
     }, [fetchShared])
 
     const handleUpload = async () => {

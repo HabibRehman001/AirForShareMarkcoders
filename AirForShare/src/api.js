@@ -1,6 +1,8 @@
+import { io } from 'socket.io-client'
+
 const PROD_API = 'https://airforsharemarkcoders.onrender.com'
 
-const API_BASE = (
+export const API_BASE = (
   import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? PROD_API : '')
 ).replace(/\/$/, '')
@@ -85,4 +87,31 @@ export async function logoutRequest() {
   } catch {
     // ignore
   }
+}
+
+/** Live share updates over Socket.IO (cookie auth). */
+export function connectShareSocket({ onUpdate, onAuthError } = {}) {
+  const socket = io(API_BASE || undefined, {
+    path: '/socket.io',
+    withCredentials: true,
+    transports: ['websocket', 'polling'],
+    autoConnect: true,
+  })
+
+  socket.on('connect', () => {
+    socket.emit('share:sync')
+  })
+
+  socket.on('share:update', (payload) => {
+    if (typeof onUpdate === 'function') onUpdate(payload)
+  })
+
+  socket.on('connect_error', (err) => {
+    const message = err?.message || ''
+    if (/auth/i.test(message) && typeof onAuthError === 'function') {
+      onAuthError(err)
+    }
+  })
+
+  return socket
 }
