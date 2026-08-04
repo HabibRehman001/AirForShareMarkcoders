@@ -2,10 +2,23 @@ import React, { useEffect, useState } from 'react'
 import AirforShare from './component/Airforshare.jsx'
 import Login from './component/Login.jsx'
 import InstallPrompt from './component/InstallPrompt.jsx'
-import { clearToken, isLoggedIn } from './api.js'
+import { checkAuth, logoutRequest } from './api.js'
 
 const App = () => {
-  const [authed, setAuthed] = useState(() => isLoggedIn())
+  const [authed, setAuthed] = useState(false)
+  const [checking, setChecking] = useState(true)
+
+  useEffect(() => {
+    let alive = true
+    checkAuth().then((ok) => {
+      if (!alive) return
+      setAuthed(ok)
+      setChecking(false)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   useEffect(() => {
     const onLogout = () => setAuthed(false)
@@ -13,9 +26,13 @@ const App = () => {
     return () => window.removeEventListener('auth:logout', onLogout)
   }, [])
 
-  const handleLogout = () => {
-    clearToken()
+  const handleLogout = async () => {
+    await logoutRequest()
     setAuthed(false)
+  }
+
+  if (checking) {
+    return <div className='login-page'><p className='login-sub'>Loading…</p></div>
   }
 
   return (

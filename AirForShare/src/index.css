@@ -1,19 +1,3 @@
-@font-face {
-  font-family: "Neutral Face";
-  src: url("/Font/Neutral face/NeutralFace.otf") format("opentype");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Neutral Face";
-  src: url("/Font/Neutral face/NeutralFace-Bold.otf") format("opentype");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
 * {
   margin: 0;
   padding: 0;
@@ -21,7 +5,7 @@
 }
 
 body {
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 #root {
@@ -29,7 +13,7 @@ body {
   color: white;
   height: 100vh;
   width: 100vw;
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 .container-wrapper {
@@ -67,19 +51,34 @@ body {
 }
 
 .content h1 {
-  font-size: clamp(1.6rem, 3.2vw, 2.4rem);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: clamp(1.75rem, 3vw, 2.5rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-transform: none;
+  color: #111;
+  line-height: 1.15;
 }
 
 .by {
   display: block;
-  margin-top: 24px;
+  margin-top: 18px;
   text-align: center;
-  /* text-transform: uppercase; */
-  text-decoration: underline;
-  font-size: 0.85rem;
-  line-height: 1.7;
+  text-decoration: none;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.55;
+  color: #555;
+  letter-spacing: 0;
+}
+
+.without {
+  position: static;
+  top: auto;
+  display: block;
+  margin-top: 6px;
+  text-decoration: none;
+  color: #666;
+  font-size: 0.95rem;
 }
 
 @keyframes logo-in {
@@ -146,7 +145,7 @@ body {
   border: 1px solid #2a2a2a;
   background: #0c0c0c;
   color: #fff;
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 0.95rem;
   border-radius: 2px;
   outline: none;
@@ -173,7 +172,7 @@ body {
 .btn {
   padding: 14px 18px;
   border-radius: 2px;
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 0.75rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -223,7 +222,7 @@ body {
   border: 1px solid #3a3a3a;
   background: #0c0c0c;
   color: #fff;
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 0.7rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -290,7 +289,7 @@ body {
   border: 1px solid #2a2a2a;
   background: #000;
   color: #fff;
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 0.9rem;
   outline: none;
   margin-bottom: 8px;
@@ -328,7 +327,7 @@ body {
   border: 1px solid #2a2a2a;
   background: #0c0c0c;
   color: #ccc;
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 0.75rem;
   border-radius: 2px;
 }
@@ -339,7 +338,7 @@ body {
   border: 1px solid #3a3a3a;
   background: #1a1a1a;
   color: #fff;
-  font-family: "Neutral Face", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 0.7rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -350,6 +349,46 @@ body {
 .file-empty {
   color: #666;
   font-size: 0.75rem;
+}
+
+.file-hint-wrap {
+  margin-top: 8px;
+  width: 100%;
+}
+
+.file-hint-wrap .file-hint {
+  margin: 0 0 8px;
+}
+
+.upload-progress {
+  width: 100%;
+  height: 3px;
+  background: #2a2a2a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.upload-progress__bar {
+  height: 100%;
+  width: 0%;
+  background: #fff;
+  border-radius: 2px;
+  transition: width 0.15s ease-out;
+}
+
+.files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.files-header .share-label {
+  margin: 0;
+}
+
+.delete-all-btn {
+  flex-shrink: 0;
 }
 
 .file-list {
@@ -614,12 +653,6 @@ body {
   transform-origin: left;
   animation: alert-progress 2.8s linear forwards;
 }
-.without{
-  position: relative;
-  top:10px;
-  text-decoration: underline;
-  /* padding:12px 12px; */
-}
 @keyframes alert-in {
   from {
     opacity: 0;
@@ -672,17 +705,12 @@ body {
   }
 
   .content h1 {
-    font-size: clamp(1.35rem, 5vw, 2rem);
+    font-size: clamp(1.5rem, 5vw, 2.1rem);
   }
 
   .by {
-    margin-top: 18px;
-    font-size: 0.72rem;
-    line-height: 1.6;
-  }
-
-  .without {
-    top: 6px;
+    margin-top: 16px;
+    font-size: 0.95rem;
   }
 
   .container-wrapper-child {
@@ -720,12 +748,12 @@ body {
   }
 
   .content h1 {
-    font-size: 1.25rem;
+    font-size: 1.4rem;
     word-break: break-word;
   }
 
   .by {
-    font-size: 0.65rem;
+    font-size: 0.9rem;
   }
 
   .container-wrapper-child {
@@ -773,11 +801,11 @@ body {
 
 @media (max-width: 380px) {
   .content h1 {
-    font-size: 1.1rem;
+    font-size: 1.25rem;
   }
 
   .by {
-    font-size: 0.58rem;
+    font-size: 0.85rem;
   }
 
   .share-label {

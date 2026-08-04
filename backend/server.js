@@ -9,6 +9,7 @@ import { pipeline } from "stream/promises";
 import { GridFSBucket, ObjectId } from "mongodb";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import cookieParser from "cookie-parser";
 
 dotenv.config();
 
@@ -17,15 +18,19 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "MarkcodersAdmin";
 const ACCOUNT_PASS = process.env.ACCOUNT_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
+const IS_PROD = process.env.NODE_ENV === "production";
+const AUTH_COOKIE = "markcoders_token";
 const TTL_SECONDS = 30 * 60;
 const TTL_MS = TTL_SECONDS * 1000;
 const MAX_FILE_SIZE = 490 * 1024 * 1024;
+const TOKEN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 const app = express();
 let bucket;
 
 app.set("trust proxy", 1);
 app.use(express.json());
+app.use(cookieParser());
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
@@ -34,8 +39,9 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (!allowedOrigins.length || (origin && allowedOrigins.includes(origin))) {
-    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  if (origin && (!allowedOrigins.length || allowedOrigins.includes(origin))) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
   } else if (!origin) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
@@ -45,11 +51,16 @@ app.use((req, res, next) => {
   next();
 });
 
-function requireAuth(req, res, next) {
+function getTokenFromRequest(req) {
   const header = req.headers.authorization || "";
-  const [type, token] = header.split(" ");
+  const [type, bearer] = header.split(" ");
+  if (type === "Bearer" && bearer) return bearer;
+  return req.cookies?.[AUTH_COOKIE] || "";
+}
 
-  if (type !== "Bearer" || !token) {
+function requireAuth(req, res, next) {
+  const token = getTokenFromRequest(req);
+  if (!token) {
     return res.status(401).json({ error: "Authentication required" });
   }
 
@@ -59,6 +70,25 @@ function requireAuth(req, res, next) {
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
   }
+}
+
+function setAuthCookie(res, token) {
+  res.cookie(AUTH_COOKIE, token, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: IS_PROD ? "none" : "lax",
+    maxAge: TOKEN_MAX_AGE_MS,
+    path: "/",
+  });
+}
+
+function clearAuthCookie(res) {
+  res.clearCookie(AUTH_COOKIE, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: IS_PROD ? "none" : "lax",
+    path: "/",
+  });
 }
 
 const fileMetaSchema = new mongoose.Schema(
@@ -209,9 +239,10 @@ app.post("/api/login", async (req, res) => {
       { expiresIn: "12h" }
     );
 
+    setAuthCookie(res, token);
+
     return res.status(200).json({
       message: "Login successful",
-      token,
       username: ADMIN_USERNAME,
     });
   } catch (err) {
@@ -220,8 +251,29 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+app.post("/api/logout", (req, res) => {
+  clearAuthCookie(res);
+  return res.status(200).json({ message: "Logged out" });
+});
+
+app.get("/api/me", (req, res) => {
+  const token = getTokenFromRequest(req);
+  if (!token) {
+    return res.status(401).json({ authenticated: false });
+  }
+  try {
+    const user = jwt.verify(token, JWT_SECRET);
+    return res.status(200).json({ authenticated: true, username: user.username });
+  } catch {
+    clearAuthCookie(res);
+    return res.status(401).json({ authenticated: false });
+  }
+});
+
 app.use("/api", (req, res, next) => {
-  if (req.path === "/login" || req.path === "/health") return next();
+  if (req.path === "/login" || req.path === "/logout" || req.path === "/health" || req.path === "/me") {
+    return next();
+  }
   return requireAuth(req, res, next);
 });
 
@@ -398,6 +450,28 @@ app.delete("/api/files/:id", async (req, res) => {
   } catch (err) {
     console.error("Delete file error:", err);
     return res.status(500).json({ error: "Failed to delete file" });
+  }
+});
+
+app.delete("/api/files", async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+    const doc = await getValidShare(ip);
+    if (!doc) {
+      return res.status(200).json({ message: "No files to delete", files: [] });
+    }
+
+    await deleteGridFsFiles(doc.files || []);
+    doc.files = [];
+    await doc.save();
+
+    return res.status(200).json({
+      message: "All files deleted",
+      files: [],
+    });
+  } catch (err) {
+    console.error("Delete all files error:", err);
+    return res.status(500).json({ error: "Failed to delete files" });
   }
 });
 

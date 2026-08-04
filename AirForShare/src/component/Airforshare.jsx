@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Delete } from 'lucide-react'
 import Alert from './alert.jsx'
-import { authFetch } from '../api.js'
+import { authFetch, uploadWithProgress } from '../api.js'
 
 function formatBytes(bytes) {
     if (!bytes && bytes !== 0) return ''
@@ -18,7 +18,9 @@ const Airforshare = ({ onLogout }) => {
     const [alert, setAlert] = useState({ message: '', type: 'success' })
     const [uploading, setUploading] = useState(false)
     const [uploadingFiles, setUploadingFiles] = useState(false)
+    const [uploadProgress, setUploadProgress] = useState(0)
     const [fileToDelete, setFileToDelete] = useState(null)
+    const [deleteAllOpen, setDeleteAllOpen] = useState(false)
     const [deleting, setDeleting] = useState(false)
     const fileInputRef = useRef(null)
 
@@ -93,36 +95,25 @@ const Airforshare = ({ onLogout }) => {
         }
 
         setUploadingFiles(true)
+        setUploadProgress(0)
         try {
             const formData = new FormData()
             selectedFiles.forEach((file) => formData.append('files', file))
 
-            const res = await authFetch('/api/upload-file', {
-                method: 'POST',
-                body: formData,
-            })
+            const data = await uploadWithProgress('/api/upload-file', formData, setUploadProgress)
 
-            const raw = await res.text()
-            let data = {}
-            if (raw) {
-                try {
-                    data = JSON.parse(raw)
-                } catch {
-                    throw new Error(res.ok ? 'Invalid server response' : `Upload failed (${res.status})`)
-                }
-            }
-
-            if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`)
-
+            setUploadProgress(100)
             setFiles(data.files || [])
             setSelectedFiles([])
             if (fileInputRef.current) fileInputRef.current.value = ''
             showAlert('File uploaded successfully', 'success')
+            await new Promise((r) => setTimeout(r, 400))
         } catch (err) {
             console.error(err)
             showAlert(err.message || 'Failed to upload file', 'error')
         } finally {
             setUploadingFiles(false)
+            setUploadProgress(0)
         }
     }
 
@@ -177,6 +168,24 @@ const Airforshare = ({ onLogout }) => {
         }
     }
 
+    const confirmDeleteAll = async () => {
+        setDeleting(true)
+        try {
+            const res = await authFetch('/api/files', { method: 'DELETE' })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) throw new Error(data.error || 'Delete failed')
+
+            setFiles([])
+            showAlert('All files deleted', 'success')
+            setDeleteAllOpen(false)
+        } catch (err) {
+            console.error(err)
+            showAlert(err.message || 'Failed to delete files', 'error')
+        } finally {
+            setDeleting(false)
+        }
+    }
+
     return (
         <div className='container-wrapper'>
             <Alert
@@ -214,6 +223,35 @@ const Airforshare = ({ onLogout }) => {
                 </div>
             )}
 
+            {deleteAllOpen && (
+                <div className='confirm-overlay' role='dialog' aria-modal='true'>
+                    <div className='confirm-modal'>
+                        <p className='confirm-title'>Delete all files?</p>
+                        <p className='confirm-text'>
+                            Confirm delete all <span>{files.length}</span> uploaded file(s)
+                        </p>
+                        <div className='confirm-actions'>
+                            <button
+                                type='button'
+                                className='btn btn-ghost'
+                                onClick={() => setDeleteAllOpen(false)}
+                                disabled={deleting}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type='button'
+                                className='btn btn-danger'
+                                onClick={confirmDeleteAll}
+                                disabled={deleting}
+                            >
+                                {deleting ? 'Deleting…' : 'Delete all'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <button type='button' className='logout-btn' onClick={onLogout}>
                 Logout
             </button>
@@ -226,7 +264,10 @@ const Airforshare = ({ onLogout }) => {
                         alt='MarkCoders'
                     />
                     <h1>MarkCoders.Share</h1>
-                    <span className='by'>Share Your Text And files <br /> <span className='without'>Without any external connections</span></span>
+                    <span className='by'>
+                      Share your text and files
+                      <span className='without'>Without any external connections</span>
+                    </span>
                 </div>
             </div>
 
@@ -278,10 +319,28 @@ const Airforshare = ({ onLogout }) => {
                                 {uploadingFiles ? 'Uploading…' : 'Upload file'}
                             </button>
                         </div>
-                        {selectedFiles.length > 0 && (
-                            <p className='file-hint'>
-                                {selectedFiles.length} file(s) selected
-                            </p>
+                        {(selectedFiles.length > 0 || uploadingFiles) && (
+                            <div className='file-hint-wrap'>
+                                <p className='file-hint'>
+                                    {uploadingFiles
+                                        ? `Uploading… ${uploadProgress}%`
+                                        : `${selectedFiles.length} file(s) selected`}
+                                </p>
+                                {uploadingFiles && (
+                                    <div
+                                        className='upload-progress'
+                                        role='progressbar'
+                                        aria-valuemin={0}
+                                        aria-valuemax={100}
+                                        aria-valuenow={uploadProgress}
+                                    >
+                                        <div
+                                            className='upload-progress__bar'
+                                            style={{ width: `${uploadProgress}%` }}
+                                        />
+                                    </div>
+                                )}
+                            </div>
                         )}
                     </div>
 
@@ -308,7 +367,18 @@ const Airforshare = ({ onLogout }) => {
                     </div>
 
                     <div className='share-block'>
-                        <label className='share-label'>Received files</label>
+                        <div className='files-header'>
+                            <label className='share-label'>Received files</label>
+                            {files.length >= 1 && (
+                                <button
+                                    type='button'
+                                    className='btn btn-ghost btn-small delete-all-btn'
+                                    onClick={() => setDeleteAllOpen(true)}
+                                >
+                                    Delete all
+                                </button>
+                            )}
+                        </div>
                         {files.length === 0 ? (
                             <p className='file-empty'>No shared files yet</p>
                         ) : (

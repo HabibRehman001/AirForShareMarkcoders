@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { apiUrl, setToken } from '../api.js'
+import { apiUrl } from '../api.js'
 
 const Login = ({ onSuccess }) => {
     const [username, setUsername] = useState('')
@@ -21,6 +21,7 @@ const Login = ({ onSuccess }) => {
             const res = await fetch(apiUrl('/api/login'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({
                     username: username.trim(),
                     password,
@@ -28,8 +29,6 @@ const Login = ({ onSuccess }) => {
             })
             const data = await res.json().catch(() => ({}))
             if (!res.ok) throw new Error(data.error || 'Login failed')
-
-            setToken(data.token)
             onSuccess(data.username)
         } catch (err) {
             setError(err.message || 'Login failed')
