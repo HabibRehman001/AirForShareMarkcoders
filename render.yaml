@@ -14,18 +14,16 @@ services:
       - key: FRONTEND_URL
         sync: false
 
-  # Frontend (Vite static site)
+  # Frontend (Vite app served with Node)
   - type: web
     name: markcoders-share-web
-    runtime: static
+    runtime: node
     plan: free
     rootDir: AirForShare
     buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+    startCommand: npm start
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: VITE_API_URL
         sync: false
