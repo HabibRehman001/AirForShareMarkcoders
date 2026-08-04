@@ -52,7 +52,8 @@ const Airforshare = () => {
             setSharedText(data.text)
             setText('')
             showAlert('Text uploaded successfully', 'success')
-        } catch {
+        } catch (err) {
+            console.error('Upload failed:', err)
             showAlert('Failed to upload text', 'error')
         } finally {
             setUploading(false)
