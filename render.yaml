@@ -14,3 +14,9 @@ services:
         sync: false
       - key: MONGODB_URI
         sync: false
+      - key: ADMIN_USERNAME
+        value: MarkcodersAdmin
+      - key: ACCOUNT_PASS
+        sync: false
+      - key: JWT_SECRET
+        sync: false

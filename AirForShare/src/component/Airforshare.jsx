@@ -1,12 +1,23 @@
-import React, { useState, useCallback, useEffect } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import Alert from './alert.jsx'
-import { apiUrl } from '../api.js'
+import { authFetch } from '../api.js'
 
-const Airforshare = () => {
+function formatBytes(bytes) {
+    if (!bytes && bytes !== 0) return ''
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const Airforshare = ({ onLogout }) => {
     const [text, setText] = useState('')
     const [sharedText, setSharedText] = useState('')
+    const [files, setFiles] = useState([])
+    const [selectedFiles, setSelectedFiles] = useState([])
     const [alert, setAlert] = useState({ message: '', type: 'success' })
     const [uploading, setUploading] = useState(false)
+    const [uploadingFiles, setUploadingFiles] = useState(false)
+    const fileInputRef = useRef(null)
 
     const showAlert = useCallback((message, type = 'success') => {
         setAlert({ message, type })
@@ -16,22 +27,23 @@ const Airforshare = () => {
         setAlert({ message: '', type: 'success' })
     }, [])
 
-    const fetchSharedText = useCallback(async () => {
+    const fetchShared = useCallback(async () => {
         try {
-            const res = await fetch(apiUrl('/api/text'))
+            const res = await authFetch('/api/text')
             if (!res.ok) throw new Error('Failed to fetch')
             const data = await res.json()
             setSharedText(data.text || '')
+            setFiles(data.files || [])
         } catch {
-            // silent on first load / poll failures
+            // silent on poll failures
         }
     }, [])
 
     useEffect(() => {
-        fetchSharedText()
-        const interval = setInterval(fetchSharedText, 3000)
+        fetchShared()
+        const interval = setInterval(fetchShared, 3000)
         return () => clearInterval(interval)
-    }, [fetchSharedText])
+    }, [fetchShared])
 
     const handleUpload = async () => {
         if (!text.trim()) {
@@ -41,7 +53,7 @@ const Airforshare = () => {
 
         setUploading(true)
         try {
-            const res = await fetch(apiUrl('/api/upload'), {
+            const res = await authFetch('/api/upload', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: text.trim() }),
@@ -50,12 +62,64 @@ const Airforshare = () => {
             if (!res.ok) throw new Error(data.error || 'Upload failed')
 
             setSharedText(data.text)
+            setFiles(data.files || [])
             setText('')
             showAlert('Text uploaded successfully', 'success')
-        } catch {
+        } catch (err) {
+            console.error(err)
             showAlert('Failed to upload text', 'error')
         } finally {
             setUploading(false)
+        }
+    }
+
+    const handleFileSelect = (e) => {
+        setSelectedFiles(Array.from(e.target.files || []))
+    }
+
+    const handleFileUpload = async () => {
+        if (!selectedFiles.length) {
+            showAlert('Please choose a file to upload', 'warning')
+            return
+        }
+
+        const tooBig = selectedFiles.find((file) => file.size > 490 * 1024 * 1024)
+        if (tooBig) {
+            showAlert('File too large (max 490MB)', 'warning')
+            return
+        }
+
+        setUploadingFiles(true)
+        try {
+            const formData = new FormData()
+            selectedFiles.forEach((file) => formData.append('files', file))
+
+            const res = await authFetch('/api/upload-file', {
+                method: 'POST',
+                body: formData,
+            })
+
+            const raw = await res.text()
+            let data = {}
+            if (raw) {
+                try {
+                    data = JSON.parse(raw)
+                } catch {
+                    throw new Error(res.ok ? 'Invalid server response' : `Upload failed (${res.status})`)
+                }
+            }
+
+            if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`)
+
+            setFiles(data.files || [])
+            setSelectedFiles([])
+            if (fileInputRef.current) fileInputRef.current.value = ''
+            showAlert('File uploaded successfully', 'success')
+        } catch (err) {
+            console.error(err)
+            showAlert(err.message || 'Failed to upload file', 'error')
+        } finally {
+            setUploadingFiles(false)
         }
     }
 
@@ -73,6 +137,22 @@ const Airforshare = () => {
         }
     }
 
+    const handleDownload = async (file) => {
+        try {
+            const res = await authFetch(`/api/files/${file.id}/download`)
+            if (!res.ok) throw new Error('Download failed')
+            const blob = await res.blob()
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = file.name
+            a.click()
+            URL.revokeObjectURL(url)
+        } catch {
+            showAlert('Failed to download file', 'error')
+        }
+    }
+
     return (
         <div className='container-wrapper'>
             <Alert
@@ -80,6 +160,10 @@ const Airforshare = () => {
                 type={alert.type}
                 onClose={closeAlert}
             />
+
+            <button type='button' className='logout-btn' onClick={onLogout}>
+                Logout
+            </button>
 
             <div className='container'>
                 <div className='content'>
@@ -119,11 +203,40 @@ const Airforshare = () => {
                         </div>
                     </div>
 
+                    <div className='share-block'>
+                        <label className='share-label' htmlFor='share-file'>
+                            Share file
+                        </label>
+                        <div className='input-row file-row'>
+                            <input
+                                id='share-file'
+                                ref={fileInputRef}
+                                type='file'
+                                multiple
+                                onChange={handleFileSelect}
+                                disabled={uploadingFiles}
+                                className='file-input'
+                            />
+                            <button
+                                className='btn btn-primary'
+                                onClick={handleFileUpload}
+                                disabled={uploadingFiles}
+                            >
+                                {uploadingFiles ? 'Uploading…' : 'Upload file'}
+                            </button>
+                        </div>
+                        {selectedFiles.length > 0 && (
+                            <p className='file-hint'>
+                                {selectedFiles.length} file(s) selected
+                            </p>
+                        )}
+                    </div>
+
                     <div className='share-divider' />
 
                     <div className='share-block'>
                         <label className='share-label' htmlFor='share-output'>
-                            Received
+                            Received text
                         </label>
                         <textarea
                             id='share-output'
@@ -139,6 +252,30 @@ const Airforshare = () => {
                         >
                             Copy to clipboard
                         </button>
+                    </div>
+
+                    <div className='share-block'>
+                        <label className='share-label'>Received files</label>
+                        {files.length === 0 ? (
+                            <p className='file-empty'>No shared files yet</p>
+                        ) : (
+                            <ul className='file-list'>
+                                {files.map((file) => (
+                                    <li key={file.id} className='file-item'>
+                                        <div className='file-info'>
+                                            <span className='file-name'>{file.name}</span>
+                                            <span className='file-size'>{formatBytes(file.size)}</span>
+                                        </div>
+                                        <button
+                                            className='btn btn-ghost btn-small'
+                                            onClick={() => handleDownload(file)}
+                                        >
+                                            Download
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
                     </div>
                 </div>
             </div>

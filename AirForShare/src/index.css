@@ -211,6 +211,185 @@ body {
   cursor: not-allowed;
 }
 
+.logout-btn {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  z-index: 20;
+  padding: 10px 14px;
+  border: 1px solid #3a3a3a;
+  background: #0c0c0c;
+  color: #fff;
+  font-family: "Neutral Face", sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.logout-btn:hover {
+  border-color: #fff;
+}
+
+.login-page {
+  min-height: 100vh;
+  width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% 40%, #141414 0%, #000 70%);
+}
+
+.login-card {
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 32px 28px;
+  border: 1px solid #2a2a2a;
+  background: #0c0c0c;
+}
+
+.login-logo {
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  border-radius: 50%;
+  margin: 0 auto 8px;
+}
+
+.login-card h1 {
+  text-align: center;
+  font-size: 1.2rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+}
+
+.login-sub {
+  text-align: center;
+  color: #b0b0b0;
+  font-size: 0.75rem;
+  margin-bottom: 12px;
+}
+
+.login-card .share-label {
+  color: #c8c8c8;
+}
+
+.login-input {
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid #2a2a2a;
+  background: #000;
+  color: #fff;
+  font-family: "Neutral Face", sans-serif;
+  font-size: 0.9rem;
+  outline: none;
+  margin-bottom: 8px;
+}
+
+.login-input::placeholder {
+  color: #8a8a8a;
+  text-transform: none;
+}
+
+.login-input:focus {
+  border-color: #fff;
+}
+
+.login-error {
+  color: #ffc9c9;
+  font-size: 0.8rem;
+  margin: 4px 0 8px;
+}
+
+.login-btn {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.file-row {
+  align-items: center;
+}
+
+.file-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #2a2a2a;
+  background: #0c0c0c;
+  color: #ccc;
+  font-family: "Neutral Face", sans-serif;
+  font-size: 0.75rem;
+  border-radius: 2px;
+}
+
+.file-input::file-selector-button {
+  margin-right: 12px;
+  padding: 8px 12px;
+  border: 1px solid #3a3a3a;
+  background: #1a1a1a;
+  color: #fff;
+  font-family: "Neutral Face", sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.file-hint,
+.file-empty {
+  color: #666;
+  font-size: 0.75rem;
+}
+
+.file-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #2a2a2a;
+  background: #0c0c0c;
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.file-name {
+  color: #fff;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size {
+  color: #777;
+  font-size: 0.7rem;
+}
+
+.btn-small {
+  padding: 10px 12px;
+  font-size: 0.65rem;
+  width: auto;
+  align-self: auto;
+}
+
 /* Alerts */
 .alert {
   position: fixed;
