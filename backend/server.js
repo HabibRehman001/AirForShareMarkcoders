@@ -145,24 +145,6 @@ const shareSchema = new mongoose.Schema(
 shareSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 const Share = mongoose.model("Share", shareSchema);
 
-/** Persistent file/text history — refs stay until user deletes from Recent Files. */
-const recentSchema = new mongoose.Schema(
-  {
-    key: { type: String, required: true, index: true },
-    type: { type: String, enum: ["file", "text"], required: true },
-    originalName: { type: String, default: "" },
-    text: { type: String, default: "" },
-    mimetype: { type: String, default: "" },
-    size: { type: Number, default: 0 },
-    storedName: { type: String, default: "" },
-    uploadedAt: { type: Date, required: true, default: Date.now },
-  },
-  { versionKey: false }
-);
-
-recentSchema.index({ key: 1, uploadedAt: -1 });
-const RecentItem = mongoose.model("RecentItem", recentSchema);
-
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
@@ -239,53 +221,6 @@ function emitShareUpdate(ip, doc) {
   io.to(shareRoom(ip)).emit("share:update", sharePayload(doc, ip));
 }
 
-function recentMeta(item) {
-  const id = item._id.toString();
-  return {
-    id,
-    type: item.type,
-    name: item.type === "text" ? "Text share" : item.originalName,
-    text: item.text || "",
-    mimetype: item.mimetype || "",
-    size: item.size || 0,
-    uploadedAt: item.uploadedAt,
-    url: item.type === "file" && item.storedName ? `/api/recent/${id}/download` : null,
-  };
-}
-
-async function getRecentPayload(key = SHARE_KEY) {
-  const items = await RecentItem.find({ key }).sort({ uploadedAt: -1 }).limit(50).lean();
-  const list = items.map(recentMeta);
-  return {
-    recent: list,
-    lastUploaded: list[0] || null,
-  };
-}
-
-async function emitRecentUpdate(key = SHARE_KEY) {
-  if (!io) return;
-  const payload = await getRecentPayload(key);
-  io.to(shareRoom(key)).emit("recent:update", payload);
-}
-
-async function isStoredNameInShare(storedName) {
-  if (!storedName) return false;
-  const doc = await Share.findOne({
-    ip: SHARE_KEY,
-    "files.storedName": storedName,
-  }).select("_id");
-  return Boolean(doc);
-}
-
-async function isStoredNameInRecent(storedName) {
-  if (!storedName) return false;
-  const item = await RecentItem.findOne({
-    key: SHARE_KEY,
-    storedName,
-  }).select("_id");
-  return Boolean(item);
-}
-
 async function deleteStoredFiles(files = []) {
   await Promise.all(
     files.map(async (file) => {
@@ -301,15 +236,9 @@ async function deleteStoredFiles(files = []) {
   );
 }
 
-/** Expire active share (received section) without wiping Recent File refs/disk. */
 async function deleteShare(doc) {
   if (!doc) return;
-  const files = doc.files || [];
-  for (const file of files) {
-    if (!file?.storedName) continue;
-    const keep = await isStoredNameInRecent(file.storedName);
-    if (!keep) await deleteStoredFiles([file]);
-  }
+  await deleteStoredFiles(doc.files || []);
   await Share.deleteOne({ _id: doc._id });
 }
 
@@ -430,32 +359,20 @@ app.post("/api/upload", async (req, res) => {
     }
 
     const ip = getShareKey();
-    const trimmed = text.trim();
     const doc = await withShareLock(ip, async () => {
       const now = new Date();
       const expiresAt = new Date(now.getTime() + TTL_MS);
       const updated = await Share.findOneAndUpdate(
         { ip },
         {
-          $set: { text: trimmed, uploadedAt: now, expiresAt },
+          $set: { text: text.trim(), uploadedAt: now, expiresAt },
           $setOnInsert: { ip, files: [] },
         },
         { upsert: true, new: true }
       );
-
-      await RecentItem.create({
-        key: ip,
-        type: "text",
-        text: trimmed.slice(0, 500),
-        uploadedAt: now,
-      });
-
       emitShareUpdate(ip, updated);
-      await emitRecentUpdate(ip);
       return updated;
     });
-
-    const recentPayload = await getRecentPayload(ip);
 
     return res.status(200).json({
       message: "Text saved",
@@ -464,7 +381,6 @@ app.post("/api/upload", async (req, res) => {
       files: (doc.files || []).map(fileMeta),
       expiresInMs: TTL_MS,
       expiresAt: doc.expiresAt,
-      ...recentPayload,
     });
   } catch (err) {
     console.error("Upload error:", err);
@@ -525,24 +441,9 @@ app.post(
           { new: true }
         );
 
-        await RecentItem.insertMany(
-          saved.map((f) => ({
-            key: ip,
-            type: "file",
-            originalName: f.originalName,
-            mimetype: f.mimetype,
-            size: f.size,
-            storedName: f.storedName,
-            uploadedAt: now,
-          }))
-        );
-
         emitShareUpdate(ip, updated);
-        await emitRecentUpdate(ip);
         return updated;
       });
-
-      const recentPayload = await getRecentPayload(ip);
 
       return res.status(200).json({
         message: "Files saved",
@@ -551,7 +452,6 @@ app.post(
         files: (doc.files || []).map(fileMeta),
         expiresInMs: TTL_MS,
         expiresAt: doc.expiresAt,
-        ...recentPayload,
       });
     } catch (err) {
       console.error("File upload error:", err);
@@ -642,7 +542,7 @@ app.delete("/api/files/:id", async (req, res) => {
       const file = doc.files.id(req.params.id);
       if (!file) return { status: 404, body: { error: "File not found" } };
 
-      // Remove from received (Share) only — Recent File refs stay until deleted there
+      await deleteStoredFiles([file]);
       file.deleteOne();
       await doc.save();
 
@@ -651,7 +551,7 @@ app.delete("/api/files/:id", async (req, res) => {
       return {
         status: 200,
         body: {
-          message: "File removed from received",
+          message: "File deleted",
           text: doc.text || "",
           files: doc.files.map(fileMeta),
         },
@@ -677,7 +577,7 @@ app.delete("/api/files", async (req, res) => {
         };
       }
 
-      // Clear received list only; keep Recent File history + disk refs
+      await deleteStoredFiles(doc.files || []);
       doc.files = [];
       await doc.save();
 
@@ -686,7 +586,7 @@ app.delete("/api/files", async (req, res) => {
       return {
         status: 200,
         body: {
-          message: "All received files cleared",
+          message: "All files deleted",
           text: doc.text || "",
           files: [],
         },
@@ -697,85 +597,6 @@ app.delete("/api/files", async (req, res) => {
   } catch (err) {
     console.error("Delete all files error:", err);
     return res.status(500).json({ error: "Failed to delete files" });
-  }
-});
-
-app.get("/api/recent", async (_req, res) => {
-  try {
-    const payload = await getRecentPayload(getShareKey());
-    return res.status(200).json(payload);
-  } catch (err) {
-    console.error("Recent list error:", err);
-    return res.status(500).json({ error: "Failed to load recent files" });
-  }
-});
-
-app.get("/api/recent/:id/download", async (req, res) => {
-  try {
-    const item = await RecentItem.findOne({
-      _id: req.params.id,
-      key: getShareKey(),
-      type: "file",
-    });
-    if (!item?.storedName) {
-      return res.status(404).json({ error: "File not found" });
-    }
-
-    const fullPath = resolveStoredPath(item.storedName);
-    await fsp.access(fullPath);
-
-    res.setHeader("Content-Type", item.mimetype || "application/octet-stream");
-    const safeName = String(item.originalName || "download").replace(/[^\w.\-() ]+/g, "_");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(item.originalName || "download")}`
-    );
-    if (item.size) res.setHeader("Content-Length", item.size);
-    res.setHeader("Cache-Control", "no-store");
-
-    const downloadStream = fs.createReadStream(fullPath);
-    downloadStream.on("error", (err) => {
-      console.error("Recent download error:", err);
-      if (!res.headersSent) res.status(404).json({ error: "File not found" });
-      else res.end();
-    });
-    return downloadStream.pipe(res);
-  } catch (err) {
-    console.error("Recent download error:", err);
-    return res.status(404).json({ error: "File not found" });
-  }
-});
-
-app.delete("/api/recent/:id", async (req, res) => {
-  try {
-    const key = getShareKey();
-    const result = await withShareLock(key, async () => {
-      const item = await RecentItem.findOne({ _id: req.params.id, key });
-      if (!item) return { status: 404, body: { error: "Item not found" } };
-
-      const storedName = item.storedName;
-      await RecentItem.deleteOne({ _id: item._id });
-
-      // Temporary delete: remove history ref; delete disk only if not still in received Share
-      if (storedName) {
-        const stillShared = await isStoredNameInShare(storedName);
-        if (!stillShared) {
-          await deleteStoredFiles([{ storedName }]);
-        }
-      }
-
-      await emitRecentUpdate(key);
-      const payload = await getRecentPayload(key);
-      return {
-        status: 200,
-        body: { message: "Removed from recent files", ...payload },
-      };
-    });
-
-    return res.status(result.status).json(result.body);
-  } catch (err) {
-    console.error("Delete recent error:", err);
-    return res.status(500).json({ error: "Failed to delete recent item" });
   }
 });
 

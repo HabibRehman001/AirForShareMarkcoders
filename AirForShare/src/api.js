@@ -105,7 +105,7 @@ export async function logoutRequest() {
 /** Live share updates over Socket.IO (cookie auth). */
 let shareSocket = null
 
-export function connectShareSocket({ onUpdate, onRecentUpdate, onAuthError } = {}) {
+export function connectShareSocket({ onUpdate, onAuthError } = {}) {
   // Reuse one socket across React Strict Mode remounts (avoids WS closed warning)
   if (!shareSocket) {
     shareSocket = io(API_BASE || undefined, {
@@ -140,11 +140,6 @@ export function connectShareSocket({ onUpdate, onRecentUpdate, onAuthError } = {
   socket.on('connect', handleConnect)
   socket.on('connect_error', handleConnectError)
 
-  const handleRecent = (payload) => {
-    if (typeof onRecentUpdate === 'function') onRecentUpdate(payload)
-  }
-  socket.on('recent:update', handleRecent)
-
   if (socket.connected) {
     socket.emit('share:sync')
   }
@@ -154,13 +149,11 @@ export function connectShareSocket({ onUpdate, onRecentUpdate, onAuthError } = {
       socket.off('share:update', handleUpdate)
       socket.off('connect', handleConnect)
       socket.off('connect_error', handleConnectError)
-      socket.off('recent:update', handleRecent)
     },
     forceDisconnect() {
       socket.off('share:update', handleUpdate)
       socket.off('connect', handleConnect)
       socket.off('connect_error', handleConnectError)
-      socket.off('recent:update', handleRecent)
       socket.disconnect()
       shareSocket = null
     },
