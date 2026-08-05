@@ -9,6 +9,7 @@ import http from "http";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
+import cors from "cors";
 import { Server } from "socket.io";
 
 dotenv.config();
@@ -35,28 +36,24 @@ const server = http.createServer(app);
 let io;
 
 app.set("trust proxy", 1);
+
+// TEMP: open CORS for testing Render → anton (tighten later)
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
 app.use(express.json());
 app.use(cookieParser());
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && (!allowedOrigins.length || allowedOrigins.includes(origin))) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-  } else if (!origin) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  }
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-
 function parseCookies(header = "") {
   return Object.fromEntries(
     String(header)
@@ -645,8 +642,9 @@ function getSocketIp(socket) {
 
 function setupSocketIo() {
   io = new Server(server, {
+    // TEMP: allow any origin while testing CORS
     cors: {
-      origin: allowedOrigins.length ? allowedOrigins : true,
+      origin: true,
       credentials: true,
     },
   });
