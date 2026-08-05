@@ -7,8 +7,12 @@ function formatBytes(bytes) {
     if (!bytes && bytes !== 0) return ''
     if (bytes < 1024) return `${bytes} B`
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
+
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024 // 10GB
+const MAX_UPLOAD_LABEL = '10GB'
 
 const Airforshare = ({ onLogout }) => {
     const [text, setText] = useState('')
@@ -107,9 +111,9 @@ const Airforshare = ({ onLogout }) => {
             return
         }
 
-        const tooBig = selectedFiles.find((file) => file.size > 490 * 1024 * 1024)
+        const tooBig = selectedFiles.find((file) => file.size > MAX_UPLOAD_BYTES)
         if (tooBig) {
-            showAlert('File too large (max 490MB)', 'warning')
+            showAlert(`File too large (max ${MAX_UPLOAD_LABEL})`, 'warning')
             return
         }
 

@@ -24,7 +24,8 @@ const AUTH_COOKIE = "markcoders_token";
 const SHARE_KEY = "markcoders";
 const TTL_SECONDS = 30 * 60;
 const TTL_MS = TTL_SECONDS * 1000;
-const MAX_FILE_SIZE = 490 * 1024 * 1024;
+const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_BYTES) || 10 * 1024 * 1024 * 1024; // 10GB default
+const MAX_FILE_SIZE_LABEL = process.env.MAX_FILE_SIZE_LABEL || "10GB";
 const TOKEN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 /** File bytes live on disk; Mongo only stores refs (storedName). */
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads"));
@@ -394,7 +395,7 @@ app.post(
     upload.array("files")(req, res, (err) => {
       if (!err) return next();
       if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
-        return res.status(400).json({ error: "File too large (max 490MB)" });
+        return res.status(400).json({ error: `File too large (max ${MAX_FILE_SIZE_LABEL})` });
       }
       return res.status(400).json({ error: err.message || "Invalid file upload" });
     });
@@ -704,7 +705,7 @@ async function start() {
 
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Auth user: ${ADMIN_USERNAME} | Max file: 490MB | Socket.IO enabled`);
+    console.log(`Auth user: ${ADMIN_USERNAME} | Max file: ${MAX_FILE_SIZE_LABEL} | Socket.IO enabled`);
   });
 
   cleanupExpiredShares();
