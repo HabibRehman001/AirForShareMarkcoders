@@ -47,14 +47,19 @@ export default defineConfig({
   ],
   server: {
     proxy: {
+      // Same-origin /api on localhost → anton (bypasses browser CORS)
       '/api': {
-        target: 'http://localhost:3001',
+        target: 'https://anton.markcoders.com',
         changeOrigin: true,
+        secure: true,
+        rewrite: (p) => `/AirForShareMarkcoders/backend${p}`,
       },
       '/socket.io': {
-        target: 'http://localhost:3001',
+        target: 'https://anton.markcoders.com',
         changeOrigin: true,
+        secure: true,
         ws: true,
+        rewrite: (p) => `/AirForShareMarkcoders/backend${p}`,
       },
     },
   },

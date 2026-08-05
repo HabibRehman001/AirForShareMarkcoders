@@ -14,9 +14,21 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "MarkcodersAdmin";
-const ACCOUNT_PASS = process.env.ACCOUNT_PASS;
+const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || "MarkcodersAdmin").trim();
+/** Bcrypt hash (preferred) or plaintext — strip wrapping quotes (common anton/panel misconfig). */
+const ACCOUNT_PASS = String(process.env.ACCOUNT_PASS || "")
+  .trim()
+  .replace(/^['"]|['"]$/g, "");
 const JWT_SECRET = process.env.JWT_SECRET;
+
+async function verifyPassword(password) {
+  if (!ACCOUNT_PASS) return false;
+  if (/^\$2[aby]\$/.test(ACCOUNT_PASS)) {
+    return bcrypt.compare(password, ACCOUNT_PASS);
+  }
+  // Plaintext fallback when ACCOUNT_PASS was set without bcrypt on the server
+  return password === ACCOUNT_PASS;
+}
 /** One shared clipboard for all logged-in MarkCoders devices (not per client IP). */
 const SHARE_KEY = "markcoders";
 const TTL_SECONDS = 30 * 60;
@@ -264,8 +276,8 @@ app.post("/api/login", async (req, res) => {
       return res.status(500).json({ error: "Auth is not configured" });
     }
 
-    const userOk = username === ADMIN_USERNAME;
-    const passOk = await bcrypt.compare(password, ACCOUNT_PASS);
+    const userOk = username.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+    const passOk = await verifyPassword(password);
     if (!userOk || !passOk) {
       return res.status(401).json({ error: "Invalid username or password" });
     }
