@@ -751,26 +751,17 @@ function setupSocketIo() {
 }
 
 async function start() {
-  if (!MONGODB_URI) {
-    console.error("Missing MONGODB_URI in environment");
-    process.exit(1);
-  }
-  if (!JWT_SECRET) {
-    console.error("Missing JWT_SECRET in environment");
-    process.exit(1);
-  }
-
   await mongoose.connect(MONGODB_URI);
   await fsp.mkdir(UPLOAD_DIR, { recursive: true });
   await ensureAdminUser();
   await clearLegacyGridFs();
-  console.log(`Connected to MongoDB (file refs only) | uploads: ${UPLOAD_DIR}`);
+  // console.log(`Connected to MongoDB (file refs only) | uploads: ${UPLOAD_DIR}`);
 
   setupSocketIo();
 
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Auth: users collection | Max file: ${MAX_FILE_SIZE_LABEL} | Socket.IO enabled`);
+    // console.log(`Auth: users collection | Max file: ${MAX_FILE_SIZE_LABEL} | Socket.IO enabled`);
   });
 
   cleanupExpiredShares();
