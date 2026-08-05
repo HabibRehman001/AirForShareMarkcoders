@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Delete } from 'lucide-react'
 import Alert from './alert.jsx'
-import { authFetch, uploadWithProgress, connectShareSocket, apiUrl } from '../api.js'
+import { authFetch, uploadWithProgress, connectShareSocket, usesNgrokApi } from '../api.js'
 
 function formatBytes(bytes) {
     if (!bytes && bytes !== 0) return ''
@@ -52,6 +52,12 @@ const Airforshare = ({ onLogout }) => {
     useEffect(() => {
         fetchShared()
 
+        // Ngrok free breaks Socket.IO in the browser — poll REST instead
+        const pollMs = usesNgrokApi() ? 3000 : 0
+        const interval = pollMs
+          ? setInterval(fetchShared, pollMs)
+          : null
+
         const socket = connectShareSocket({
             onUpdate: (data) => {
                 setSharedText(data?.text || '')
@@ -63,6 +69,7 @@ const Airforshare = ({ onLogout }) => {
         })
 
         return () => {
+            if (interval) clearInterval(interval)
             socket.disconnect()
             uploadAbortRef.current?.abort()
         }
@@ -166,8 +173,23 @@ const Airforshare = ({ onLogout }) => {
         }
     }
 
-    const fileDownloadHref = (file) =>
-        apiUrl(file.url || `/api/files/${file.id}/download`)
+    const handleDownload = async (file) => {
+        try {
+            const res = await authFetch(file.url || `/api/files/${file.id}/download`)
+            if (!res.ok) throw new Error('Download failed')
+            const blob = await res.blob()
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = file.name || 'download'
+            document.body.appendChild(a)
+            a.click()
+            a.remove()
+            URL.revokeObjectURL(url)
+        } catch {
+            showAlert('Failed to download file', 'error')
+        }
+    }
 
     const confirmDeleteFile = async () => {
         if (!fileToDelete) return
@@ -420,13 +442,13 @@ const Airforshare = ({ onLogout }) => {
                                             <span className='file-size'>{formatBytes(file.size)}</span>
                                         </div>
                                         <div className='file-actions'>
-                                            <a
+                                            <button
+                                                type='button'
                                                 className='btn btn-ghost btn-small'
-                                                href={fileDownloadHref(file)}
-                                                download={file.name || 'download'}
+                                                onClick={() => handleDownload(file)}
                                             >
                                                 Download
-                                            </a>
+                                            </button>
                                             <button
                                                 type='button'
                                                 className='file-delete-btn'

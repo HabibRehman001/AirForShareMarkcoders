@@ -4,6 +4,8 @@ import { io } from 'socket.io-client'
 /** Manager / anton host — API root (app paths still use /api/...). */
 const PROD_API = 'https://anton.markcoders.com/AirForShareMarkcoders/backend/api'
 
+const TOKEN_KEY = 'markcoders_token'
+
 function normalizeApiBase(value) {
   return String(value || '')
     .trim()
@@ -14,6 +16,27 @@ export const API_BASE = normalizeApiBase(
   import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? PROD_API : '')
 )
+
+export function getToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token)
+    else localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+export function clearToken() {
+  setToken('')
+}
 
 /**
  * Join API base + path without doubling `/api`.
@@ -45,15 +68,26 @@ function getSocketTarget() {
   }
 }
 
+function authHeaders(extra) {
+  const headers = new Headers(extra || {})
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  // ngrok free browser warning interstitial breaks API/CORS
+  if (/ngrok/i.test(API_BASE)) {
+    headers.set('ngrok-skip-browser-warning', 'true')
+  }
+  return headers
+}
+
 export async function authFetch(path, options = {}) {
-  const headers = new Headers(options.headers || {})
+  const headers = authHeaders(options.headers)
   const res = await fetch(apiUrl(path), {
     ...options,
     headers,
-    credentials: 'include',
   })
 
   if (res.status === 401 && path !== '/api/me' && path !== '/api/login') {
+    clearToken()
     window.dispatchEvent(new Event('auth:logout'))
   }
 
@@ -68,9 +102,13 @@ export async function uploadWithProgress(path, formData, onProgress, signal) {
   try {
     if (typeof onProgress === 'function') onProgress(0)
 
+    const token = getToken()
     const response = await axios.post(apiUrl(path), formData, {
-      withCredentials: true,
       signal,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(/ngrok/i.test(API_BASE) ? { 'ngrok-skip-browser-warning': 'true' } : {}),
+      },
       onUploadProgress: (event) => {
         if (typeof onProgress !== 'function') return
 
@@ -104,6 +142,7 @@ export async function uploadWithProgress(path, formData, onProgress, signal) {
 
     const status = err?.response?.status
     if (status === 401 && path !== '/api/me' && path !== '/api/login') {
+      clearToken()
       window.dispatchEvent(new Event('auth:logout'))
     }
 
@@ -117,6 +156,7 @@ export async function uploadWithProgress(path, formData, onProgress, signal) {
 
 export async function checkAuth() {
   try {
+    if (!getToken()) return false
     const res = await authFetch('/api/me')
     if (!res.ok) return false
     const data = await res.json()
@@ -131,20 +171,36 @@ export async function logoutRequest() {
     await authFetch('/api/logout', { method: 'POST' })
   } catch {
     // ignore
+  } finally {
+    clearToken()
   }
 }
 
-/** Live share updates over Socket.IO (cookie auth). */
+/** Live share updates over Socket.IO (Bearer auth via handshake.auth). */
 let shareSocket = null
 
+/**
+ * Ngrok free interstitial breaks Socket.IO in browsers (can't set skip header on WS/polling).
+ * Use REST polling instead when API is on ngrok.
+ */
+export function usesNgrokApi() {
+  return /ngrok/i.test(API_BASE)
+}
+
 export function connectShareSocket({ onUpdate, onAuthError } = {}) {
+  if (usesNgrokApi()) {
+    return {
+      disconnect() {},
+      forceDisconnect() {},
+    }
+  }
+
   // Reuse one socket across React Strict Mode remounts (avoids WS closed warning)
   if (!shareSocket) {
     const { url, path } = getSocketTarget()
     shareSocket = io(url, {
       path,
-      withCredentials: true,
-      // Polling first is more reliable through the Vite proxy; upgrades to WS after
+      auth: { token: getToken() },
       transports: ['polling', 'websocket'],
       autoConnect: true,
       reconnection: true,

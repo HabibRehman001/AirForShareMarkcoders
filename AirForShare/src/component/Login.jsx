@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { apiUrl } from '../api.js'
+import { apiUrl, setToken, API_BASE } from '../api.js'
 
 const Login = ({ onSuccess }) => {
     const [username, setUsername] = useState('')
@@ -20,8 +20,10 @@ const Login = ({ onSuccess }) => {
         try {
             const res = await fetch(apiUrl('/api/login'), {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(/ngrok/i.test(API_BASE) ? { 'ngrok-skip-browser-warning': 'true' } : {}),
+                },
                 body: JSON.stringify({
                     username: username.trim(),
                     password,
@@ -29,6 +31,8 @@ const Login = ({ onSuccess }) => {
             })
             const data = await res.json().catch(() => ({}))
             if (!res.ok) throw new Error(data.error || 'Login failed')
+            if (!data.token) throw new Error('No token returned from server')
+            setToken(data.token)
             onSuccess(data.username)
         } catch (err) {
             setError(err.message || 'Login failed')

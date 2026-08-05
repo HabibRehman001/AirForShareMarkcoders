@@ -9,4 +9,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: VITE_API_URL
-        value: https://anton.markcoders.com/AirForShareMarkcoders/backend/api
+        value: https://aged-living-galley.ngrok-free.dev

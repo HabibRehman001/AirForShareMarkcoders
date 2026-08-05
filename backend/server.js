@@ -8,7 +8,6 @@ import path from "path";
 import http from "http";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import cookieParser from "cookie-parser";
 import { Server } from "socket.io";
 
 dotenv.config();
@@ -18,15 +17,12 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "MarkcodersAdmin";
 const ACCOUNT_PASS = process.env.ACCOUNT_PASS;
 const JWT_SECRET = process.env.JWT_SECRET;
-const IS_PROD = process.env.NODE_ENV === "production";
-const AUTH_COOKIE = "markcoders_token";
 /** One shared clipboard for all logged-in MarkCoders devices (not per client IP). */
 const SHARE_KEY = "markcoders";
 const TTL_SECONDS = 30 * 60;
 const TTL_MS = TTL_SECONDS * 1000;
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_BYTES) || 10 * 1024 * 1024 * 1024; // 10GB default
 const MAX_FILE_SIZE_LABEL = process.env.MAX_FILE_SIZE_LABEL || "10GB";
-const TOKEN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 /** File bytes live on disk; Mongo only stores refs (storedName). */
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads"));
 
@@ -36,71 +32,38 @@ let io;
 
 app.set("trust proxy", 1);
 app.use(express.json());
-app.use(cookieParser());
 
-function normalizeOrigin(value = "") {
-  return String(value).trim().replace(/\/$/, "");
-}
-
-const allowedOrigins = (process.env.FRONTEND_URL || "")
-  .split(",")
-  .map(normalizeOrigin)
-  .filter(Boolean);
-
-function isOriginAllowed(origin) {
-  if (!origin) return false;
-  // No FRONTEND_URL configured → allow any browser origin (dev / first deploy)
-  if (!allowedOrigins.length) return true;
-  return allowedOrigins.includes(normalizeOrigin(origin));
-}
-
+/**
+ * Cross-origin friendly CORS (Render / ngrok / localhost).
+ * Echo Origin + Allow-Credentials so both Bearer and older cookie clients work.
+ */
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-
-  // Credentialed browser calls cannot use *. Must echo the exact Origin.
-  if (origin && isOriginAllowed(origin)) {
+  if (origin) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader("Vary", "Origin");
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
   }
-
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    req.headers["access-control-request-headers"] || "Content-Type, Authorization"
+    req.headers["access-control-request-headers"] ||
+      "Content-Type, Authorization, ngrok-skip-browser-warning"
   );
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   return next();
 });
-
-function parseCookies(header = "") {
-  return Object.fromEntries(
-    String(header)
-      .split(";")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => {
-        const eq = part.indexOf("=");
-        if (eq === -1) return [part, ""];
-        const key = part.slice(0, eq);
-        const value = part.slice(eq + 1);
-        try {
-          return [key, decodeURIComponent(value)];
-        } catch {
-          return [key, value];
-        }
-      })
-  );
-}
 
 function getTokenFromRequest(req) {
   const header = req.headers.authorization || "";
   const [type, bearer] = header.split(" ");
   if (type === "Bearer" && bearer) return bearer;
-  return req.cookies?.[AUTH_COOKIE] || "";
+  // Optional query token (e.g. download links)
+  const q = req.query?.token;
+  if (typeof q === "string" && q) return q;
+  return "";
 }
 
 function requireAuth(req, res, next) {
@@ -115,25 +78,6 @@ function requireAuth(req, res, next) {
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
   }
-}
-
-function setAuthCookie(res, token) {
-  res.cookie(AUTH_COOKIE, token, {
-    httpOnly: true,
-    secure: IS_PROD,
-    sameSite: IS_PROD ? "none" : "lax",
-    maxAge: TOKEN_MAX_AGE_MS,
-    path: "/",
-  });
-}
-
-function clearAuthCookie(res) {
-  res.clearCookie(AUTH_COOKIE, {
-    httpOnly: true,
-    secure: IS_PROD,
-    sameSite: IS_PROD ? "none" : "lax",
-    path: "/",
-  });
 }
 
 function shareRoom(ip) {
@@ -218,7 +162,7 @@ function fileMeta(file) {
     name: file.originalName,
     mimetype: file.mimetype,
     size: file.size,
-    // Public download path (auth cookie required) — Share stores ref only, not file bytes
+    // Download path — Share stores ref only, not file bytes
     url: `/api/files/${id}/download`,
   };
 }
@@ -332,11 +276,10 @@ app.post("/api/login", async (req, res) => {
       { expiresIn: "12h" }
     );
 
-    setAuthCookie(res, token);
-
     return res.status(200).json({
       message: "Login successful",
       username: ADMIN_USERNAME,
+      token,
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -344,8 +287,8 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-app.post("/api/logout", (req, res) => {
-  clearAuthCookie(res);
+app.post("/api/logout", (_req, res) => {
+  // Client clears localStorage token; nothing to clear server-side
   return res.status(200).json({ message: "Logged out" });
 });
 
@@ -359,7 +302,6 @@ app.get("/api/me", (req, res) => {
     const user = jwt.verify(token, JWT_SECRET);
     return res.status(200).json({ authenticated: true, username: user.username });
   } catch {
-    clearAuthCookie(res);
     return res.status(200).json({ authenticated: false });
   }
 });
@@ -665,22 +607,17 @@ function getSocketIp(socket) {
 function setupSocketIo() {
   io = new Server(server, {
     cors: {
-      origin: (origin, callback) => {
-        if (!origin || isOriginAllowed(origin)) return callback(null, true);
-        return callback(new Error("CORS blocked"), false);
-      },
+      origin: true,
       credentials: true,
     },
   });
 
   io.use((socket, next) => {
     try {
-      const cookies = parseCookies(socket.handshake.headers.cookie || "");
       const authHeader = socket.handshake.headers.authorization || "";
       const [type, bearer] = String(authHeader).split(" ");
       const token =
         (type === "Bearer" && bearer) ||
-        cookies[AUTH_COOKIE] ||
         socket.handshake.auth?.token ||
         "";
 
