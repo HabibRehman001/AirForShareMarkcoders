@@ -84,6 +84,7 @@ export async function authFetch(path, options = {}) {
   const res = await fetch(apiUrl(path), {
     ...options,
     headers,
+    credentials: 'include',
   })
 
   if (res.status === 401 && path !== '/api/me' && path !== '/api/login') {
@@ -105,6 +106,7 @@ export async function uploadWithProgress(path, formData, onProgress, signal) {
     const token = getToken()
     const response = await axios.post(apiUrl(path), formData, {
       signal,
+      withCredentials: true,
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(/ngrok/i.test(API_BASE) ? { 'ngrok-skip-browser-warning': 'true' } : {}),
@@ -156,7 +158,6 @@ export async function uploadWithProgress(path, formData, onProgress, signal) {
 
 export async function checkAuth() {
   try {
-    if (!getToken()) return false
     const res = await authFetch('/api/me')
     if (!res.ok) return false
     const data = await res.json()
@@ -201,6 +202,7 @@ export function connectShareSocket({ onUpdate, onAuthError } = {}) {
     shareSocket = io(url, {
       path,
       auth: { token: getToken() },
+      withCredentials: true,
       transports: ['polling', 'websocket'],
       autoConnect: true,
       reconnection: true,

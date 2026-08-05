@@ -8,6 +8,7 @@ import path from "path";
 import http from "http";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import cookieParser from "cookie-parser";
 import { Server } from "socket.io";
 
 dotenv.config();
@@ -15,6 +16,8 @@ dotenv.config();
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
+const AUTH_COOKIE = "markcoders_token";
+const IS_PROD = process.env.NODE_ENV === "production";
 /** Seeded into `users` on startup (DB is source of truth for login). */
 const SEED_USERNAME = "MarkCodersAdmin";
 const SEED_PASSWORD_HASH =
@@ -35,10 +38,11 @@ let io;
 
 app.set("trust proxy", 1);
 app.use(express.json());
+app.use(cookieParser());
 
 /**
  * Cross-origin friendly CORS (Render / ngrok / localhost).
- * Echo Origin + Allow-Credentials so both Bearer and older cookie clients work.
+ * Echo Origin + Allow-Credentials so cookie + Bearer clients work.
  */
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -59,10 +63,34 @@ app.use((req, res, next) => {
   return next();
 });
 
+function authCookieOptions() {
+  // Cross-site (Render → anton) needs SameSite=None; Secure. Local http uses Lax.
+  const secure = IS_PROD || process.env.COOKIE_SECURE === "true";
+  return {
+    httpOnly: true,
+    secure,
+    sameSite: secure ? "none" : "lax",
+    maxAge: 12 * 60 * 60 * 1000,
+    path: "/",
+  };
+}
+
+function setAuthCookie(res, token) {
+  res.cookie(AUTH_COOKIE, token, authCookieOptions());
+}
+
+function clearAuthCookie(res) {
+  res.clearCookie(AUTH_COOKIE, {
+    ...authCookieOptions(),
+    maxAge: 0,
+  });
+}
+
 function getTokenFromRequest(req) {
   const header = req.headers.authorization || "";
   const [type, bearer] = header.split(" ");
   if (type === "Bearer" && bearer) return bearer;
+  if (req.cookies?.[AUTH_COOKIE]) return req.cookies[AUTH_COOKIE];
   // Optional query token (e.g. download links)
   const q = req.query?.token;
   if (typeof q === "string" && q) return q;
@@ -344,6 +372,8 @@ app.post("/api/login", async (req, res) => {
       { expiresIn: "12h" }
     );
 
+    setAuthCookie(res, token);
+
     return res.status(200).json({
       message: "Login successful",
       username: user.username,
@@ -356,7 +386,7 @@ app.post("/api/login", async (req, res) => {
 });
 
 app.post("/api/logout", (_req, res) => {
-  // Client clears localStorage token; nothing to clear server-side
+  clearAuthCookie(res);
   return res.status(200).json({ message: "Logged out" });
 });
 
@@ -684,9 +714,15 @@ function setupSocketIo() {
     try {
       const authHeader = socket.handshake.headers.authorization || "";
       const [type, bearer] = String(authHeader).split(" ");
+      const cookieHeader = socket.handshake.headers.cookie || "";
+      const cookieMatch = cookieHeader.match(
+        new RegExp(`(?:^|;\\s*)${AUTH_COOKIE}=([^;]*)`)
+      );
+      const cookieToken = cookieMatch ? decodeURIComponent(cookieMatch[1]) : "";
       const token =
         (type === "Bearer" && bearer) ||
         socket.handshake.auth?.token ||
+        cookieToken ||
         "";
 
       if (!token) return next(new Error("Authentication required"));

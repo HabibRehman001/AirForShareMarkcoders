@@ -20,6 +20,7 @@ const Login = ({ onSuccess }) => {
         try {
             const res = await fetch(apiUrl('/api/login'), {
                 method: 'POST',
+                credentials: 'include',
                 headers: {
                     'Content-Type': 'application/json',
                     ...(/ngrok/i.test(API_BASE) ? { 'ngrok-skip-browser-warning': 'true' } : {}),
@@ -31,8 +32,23 @@ const Login = ({ onSuccess }) => {
             })
             const data = await res.json().catch(() => ({}))
             if (!res.ok) throw new Error(data.error || 'Login failed')
-            if (!data.token) throw new Error('No token returned from server')
-            setToken(data.token)
+
+            // Prefer body token; cookie is also set (httpOnly). Either is enough.
+            if (data.token) {
+                setToken(data.token)
+            } else {
+                // Cookie-only response (older anton): confirm session via /api/me
+                const meRes = await fetch(apiUrl('/api/me'), {
+                    credentials: 'include',
+                    headers: {
+                        ...(/ngrok/i.test(API_BASE) ? { 'ngrok-skip-browser-warning': 'true' } : {}),
+                    },
+                })
+                const me = await meRes.json().catch(() => ({}))
+                if (!me.authenticated) {
+                    throw new Error('No token returned from server')
+                }
+            }
             onSuccess(data.username)
         } catch (err) {
             setError(err.message || 'Login failed')
