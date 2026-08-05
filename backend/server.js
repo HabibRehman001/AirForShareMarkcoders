@@ -14,28 +14,19 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
-const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || "MarkcodersAdmin").trim();
-/** Bcrypt hash (preferred) or plaintext — strip wrapping quotes (common anton/panel misconfig). */
-const ACCOUNT_PASS = String(process.env.ACCOUNT_PASS || "")
-  .trim()
-  .replace(/^['"]|['"]$/g, "");
 const JWT_SECRET = process.env.JWT_SECRET;
+/** Seeded into `users` on startup (DB is source of truth for login). */
+const SEED_USERNAME = "MarkCodersAdmin";
+const SEED_PASSWORD_HASH =
+  "$2a$12$raexmxiw4EuRgVZATO5CiuQjp2VLxHMT7/.r/wmaharRWNfTrGcMC";
 
-async function verifyPassword(password) {
-  if (!ACCOUNT_PASS) return false;
-  if (/^\$2[aby]\$/.test(ACCOUNT_PASS)) {
-    return bcrypt.compare(password, ACCOUNT_PASS);
-  }
-  // Plaintext fallback when ACCOUNT_PASS was set without bcrypt on the server
-  return password === ACCOUNT_PASS;
-}
 /** One shared clipboard for all logged-in MarkCoders devices (not per client IP). */
 const SHARE_KEY = "markcoders";
 const TTL_SECONDS = 30 * 60;
 const TTL_MS = TTL_SECONDS * 1000;
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_BYTES) || 10 * 1024 * 1024 * 1024; // 10GB default
 const MAX_FILE_SIZE_LABEL = process.env.MAX_FILE_SIZE_LABEL || "10GB";
-/** File bytes live on disk; Mongo only stores refs (storedName). */
+/** File bytes live on disk; Mongo only stores refs (storedName). Never write GridFS. */
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads"));
 
 const app = express();
@@ -96,6 +87,16 @@ function shareRoom(ip) {
   return `share:${ip}`;
 }
 
+const userSchema = new mongoose.Schema(
+  {
+    username: { type: String, required: true, unique: true, trim: true },
+    passwordHash: { type: String, required: true },
+  },
+  { versionKey: false, timestamps: true }
+);
+
+const User = mongoose.model("User", userSchema);
+
 const fileMetaSchema = new mongoose.Schema(
   {
     originalName: { type: String, required: true },
@@ -103,6 +104,8 @@ const fileMetaSchema = new mongoose.Schema(
     size: { type: Number, required: true },
     /** Disk filename only — never store file bytes in Mongo. */
     storedName: { type: String, required: true },
+    /** Legacy GridFS id (old uploads). Deleted with the file when present. */
+    gridFsId: { type: String, required: false },
   },
   { _id: true }
 );
@@ -197,19 +200,66 @@ function emitShareUpdate(ip, doc) {
   io.to(shareRoom(ip)).emit("share:update", sharePayload(doc, ip));
 }
 
+function isObjectIdString(value) {
+  return mongoose.Types.ObjectId.isValid(value) && String(value).length === 24;
+}
+
+/** Remove GridFS file + all its chunks (legacy uploads / orphan cleanup). */
+async function deleteGridFsById(id) {
+  if (!id || !isObjectIdString(id)) return;
+  const db = mongoose.connection.db;
+  if (!db) return;
+  const oid = new mongoose.Types.ObjectId(String(id));
+  await db.collection("fs.files").deleteOne({ _id: oid });
+  await db.collection("fs.chunks").deleteMany({ files_id: oid });
+}
+
 async function deleteStoredFiles(files = []) {
   await Promise.all(
     files.map(async (file) => {
-      if (!file?.storedName) return;
-      try {
-        await fsp.unlink(resolveStoredPath(file.storedName));
-      } catch (err) {
-        if (err?.code !== "ENOENT") {
-          console.error("Disk delete error:", err.message);
+      const diskName = file?.storedName;
+      if (diskName && !isObjectIdString(diskName)) {
+        try {
+          await fsp.unlink(resolveStoredPath(diskName));
+        } catch (err) {
+          if (err?.code !== "ENOENT") {
+            console.error("Disk delete error:", err.message);
+          }
+        }
+      }
+
+      // Always wipe GridFS bytes + chunks when this file referenced them
+      const gridId = file?.gridFsId || (isObjectIdString(diskName) ? diskName : null);
+      if (gridId) {
+        try {
+          await deleteGridFsById(gridId);
+        } catch (err) {
+          console.error("GridFS delete error:", err.message);
         }
       }
     })
   );
+}
+
+/** Drop leftover GridFS data — this app stores files on disk only. */
+async function clearLegacyGridFs() {
+  const db = mongoose.connection.db;
+  if (!db) return;
+  const files = await db.collection("fs.files").countDocuments();
+  const chunks = await db.collection("fs.chunks").countDocuments();
+  if (!files && !chunks) return;
+  await db.collection("fs.chunks").deleteMany({});
+  await db.collection("fs.files").deleteMany({});
+  console.log(`Cleared legacy GridFS leftovers (${files} files, ${chunks} chunks)`);
+}
+
+async function ensureAdminUser() {
+  await User.findOneAndUpdate(
+    { username: SEED_USERNAME },
+    { $set: { username: SEED_USERNAME, passwordHash: SEED_PASSWORD_HASH } },
+    { upsert: true, returnDocument: "after" }
+  );
+  console.log(`User ready: ${SEED_USERNAME} (users collection)`);
 }
 
 async function deleteShare(doc) {
@@ -272,25 +322,31 @@ app.post("/api/login", async (req, res) => {
     if (!username || !password) {
       return res.status(400).json({ error: "Username and password required" });
     }
-    if (!ACCOUNT_PASS || !JWT_SECRET) {
+    if (!JWT_SECRET) {
       return res.status(500).json({ error: "Auth is not configured" });
     }
 
-    const userOk = username.toLowerCase() === ADMIN_USERNAME.toLowerCase();
-    const passOk = await verifyPassword(password);
-    if (!userOk || !passOk) {
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    const passOk = await bcrypt.compare(password, user.passwordHash);
+    if (!passOk) {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
     const token = jwt.sign(
-      { username: ADMIN_USERNAME, role: "admin" },
+      { username: user.username, role: "admin" },
       JWT_SECRET,
       { expiresIn: "12h" }
     );
 
     return res.status(200).json({
       message: "Login successful",
-      username: ADMIN_USERNAME,
+      username: user.username,
       token,
     });
   } catch (err) {
@@ -663,20 +719,22 @@ async function start() {
     console.error("Missing MONGODB_URI in environment");
     process.exit(1);
   }
-  if (!ACCOUNT_PASS || !JWT_SECRET) {
-    console.error("Missing ACCOUNT_PASS (bcrypt hash) or JWT_SECRET");
+  if (!JWT_SECRET) {
+    console.error("Missing JWT_SECRET in environment");
     process.exit(1);
   }
 
   await mongoose.connect(MONGODB_URI);
   await fsp.mkdir(UPLOAD_DIR, { recursive: true });
+  await ensureAdminUser();
+  await clearLegacyGridFs();
   console.log(`Connected to MongoDB (file refs only) | uploads: ${UPLOAD_DIR}`);
 
   setupSocketIo();
 
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Auth user: ${ADMIN_USERNAME} | Max file: ${MAX_FILE_SIZE_LABEL} | Socket.IO enabled`);
+    console.log(`Auth: users collection | Max file: ${MAX_FILE_SIZE_LABEL} | Socket.IO enabled`);
   });
 
   cleanupExpiredShares();
