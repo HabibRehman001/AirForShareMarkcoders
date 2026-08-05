@@ -1,16 +1,48 @@
 import axios from 'axios'
 import { io } from 'socket.io-client'
 
-const PROD_API = 'https://airforsharemarkcoders.onrender.com'
+/** Manager / anton host — API root (app paths still use /api/...). */
+const PROD_API = 'https://anton.markcoders.com/AirForShareMarkcoders/backend/api'
 
-export const API_BASE = (
+function normalizeApiBase(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\/$/, '')
+}
+
+export const API_BASE = normalizeApiBase(
   import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? PROD_API : '')
-).replace(/\/$/, '')
+)
 
+/**
+ * Join API base + path without doubling `/api`.
+ * Base may be `.../backend` or `.../backend/api` (manager style).
+ */
 export function apiUrl(path) {
-  const normalized = path.startsWith('/') ? path : `/${path}`
+  let normalized = path.startsWith('/') ? path : `/${path}`
+  if (!API_BASE) return normalized
+
+  if (API_BASE.endsWith('/api') && (normalized === '/api' || normalized.startsWith('/api/'))) {
+    normalized = normalized.slice(4) || '/'
+  }
   return `${API_BASE}${normalized}`
+}
+
+/** Socket.IO URL + path when API is hosted under a subpath on anton. */
+function getSocketTarget() {
+  if (!API_BASE) {
+    return { url: undefined, path: '/socket.io' }
+  }
+  try {
+    const u = new URL(API_BASE)
+    let prefix = u.pathname.replace(/\/$/, '')
+    if (prefix.endsWith('/api')) prefix = prefix.slice(0, -4)
+    const path = `${prefix}/socket.io`.replace(/\/{2,}/g, '/') || '/socket.io'
+    return { url: u.origin, path }
+  } catch {
+    return { url: API_BASE, path: '/socket.io' }
+  }
 }
 
 export async function authFetch(path, options = {}) {
@@ -108,8 +140,9 @@ let shareSocket = null
 export function connectShareSocket({ onUpdate, onAuthError } = {}) {
   // Reuse one socket across React Strict Mode remounts (avoids WS closed warning)
   if (!shareSocket) {
-    shareSocket = io(API_BASE || undefined, {
-      path: '/socket.io',
+    const { url, path } = getSocketTarget()
+    shareSocket = io(url, {
+      path,
       withCredentials: true,
       // Polling first is more reliable through the Vite proxy; upgrades to WS after
       transports: ['polling', 'websocket'],
