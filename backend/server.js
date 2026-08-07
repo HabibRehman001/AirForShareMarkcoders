@@ -31,6 +31,20 @@ const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_BYTES) || 10 * 1024 * 102
 const MAX_FILE_SIZE_LABEL = process.env.MAX_FILE_SIZE_LABEL || "10GB";
 /** File bytes live on disk; Mongo only stores refs (storedName). Never write GridFS. */
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads"));
+/**
+ * Network lock (Wi‑Fi via public IP).
+ * NETWORK_LOCK=true → enforce. IPs auto-saved on successful login (no manual updates).
+ * Optional ALLOWED_IPS seed still supported.
+ */
+const NETWORK_LOCK =
+  process.env.NETWORK_LOCK === "true" ||
+  process.env.NETWORK_LOCK === "1" ||
+  String(process.env.ALLOWED_IPS || "").trim().length > 0;
+const ALLOWED_IPS = String(process.env.ALLOWED_IPS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const NETWORK_REGISTER_SECRET = String(process.env.NETWORK_REGISTER_SECRET || "").trim();
 
 const app = express();
 const server = http.createServer(app);
@@ -62,6 +76,58 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   return next();
 });
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  let ip = forwarded
+    ? String(forwarded).split(",")[0].trim()
+    : req.socket.remoteAddress || "unknown";
+  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
+  const zone = ip.indexOf("%");
+  if (zone !== -1) ip = ip.slice(0, zone);
+  return ip;
+}
+
+async function isIpAllowed(ip) {
+  if (!NETWORK_LOCK) return true;
+  if (!ip || ip === "unknown") return false;
+  if (ip === "127.0.0.1" || ip === "::1") return true;
+  if (ALLOWED_IPS.includes(ip)) return true;
+  try {
+    const found = await AllowedNetwork.findOne({ ip }).lean();
+    return Boolean(found);
+  } catch {
+    return false;
+  }
+}
+
+function isNetworkExemptPath(pathname) {
+  return (
+    pathname === "/" ||
+    pathname === "/health" ||
+    pathname === "/api/health" ||
+    pathname === "/api/login" ||
+    pathname === "/api/logout" ||
+    pathname === "/api/me" ||
+    pathname === "/api/network/register"
+  );
+}
+
+/** Block API unless client IP is enrolled (auto on login) or in ALLOWED_IPS. */
+async function requireAllowedNetwork(req, res, next) {
+  if (!NETWORK_LOCK) return next();
+  if (isNetworkExemptPath(req.path)) return next();
+
+  const ip = getClientIp(req);
+  if (await isIpAllowed(ip)) return next();
+
+  return res.status(403).json({
+    error: "This app is only available on approved MarkCoders networks. Log in once on this Wi‑Fi to enroll it.",
+    ip,
+  });
+}
+
+app.use(requireAllowedNetwork);
 
 function authCookieOptions() {
   // Cross-site (Render → anton) needs SameSite=None; Secure. Local http uses Lax.
@@ -162,15 +228,6 @@ const upload = multer({
   }),
   limits: { fileSize: MAX_FILE_SIZE },
 });
-
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-  let ip = forwarded
-    ? String(forwarded).split(",")[0].trim()
-    : req.socket.remoteAddress || "unknown";
-  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
-  return ip;
-}
 
 function getShareKey() {
   return SHARE_KEY;
@@ -405,10 +462,8 @@ app.get("/api/me", (req, res) => {
 });
 
 app.use("/api", (req, res, next) => {
-  if (req.path === "/login" || req.path === "/logout" || req.path === "/health" || req.path === "/me") {
-    return next();
-  }
-  return requireAuth(req, res, next);
+  // VPN-gated open share board — no login required
+  return next();
 });
 
 app.post("/api/upload", async (req, res) => {
@@ -699,6 +754,8 @@ function getSocketIp(socket) {
     ? String(forwarded).split(",")[0].trim()
     : socket.handshake.address || "unknown";
   if (ip.startsWith("::ffff:")) ip = ip.slice(7);
+  const zone = ip.indexOf("%");
+  if (zone !== -1) ip = ip.slice(0, zone);
   return ip;
 }
 
@@ -710,28 +767,17 @@ function setupSocketIo() {
     },
   });
 
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
-      const authHeader = socket.handshake.headers.authorization || "";
-      const [type, bearer] = String(authHeader).split(" ");
-      const cookieHeader = socket.handshake.headers.cookie || "";
-      const cookieMatch = cookieHeader.match(
-        new RegExp(`(?:^|;\\s*)${AUTH_COOKIE}=([^;]*)`)
-      );
-      const cookieToken = cookieMatch ? decodeURIComponent(cookieMatch[1]) : "";
-      const token =
-        (type === "Bearer" && bearer) ||
-        socket.handshake.auth?.token ||
-        cookieToken ||
-        "";
-
-      if (!token) return next(new Error("Authentication required"));
-      socket.user = jwt.verify(token, JWT_SECRET);
+      const clientIp = getSocketIp(socket);
+      if (!(await isIpAllowed(clientIp))) {
+        return next(new Error("Network not allowed"));
+      }
       socket.shareKey = getShareKey();
-      socket.clientIp = getSocketIp(socket);
+      socket.clientIp = clientIp;
       return next();
     } catch {
-      return next(new Error("Invalid or expired token"));
+      return next(new Error("Connection rejected"));
     }
   });
 
@@ -761,7 +807,11 @@ async function start() {
 
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    // console.log(`Auth: users collection | Max file: ${MAX_FILE_SIZE_LABEL} | Socket.IO enabled`);
+    if (ALLOWED_IPS.length) {
+      console.log(`Network lock: ${ALLOWED_IPS.length} allowed public IP(s)`);
+    } else {
+      console.log("Network lock: off (ALLOWED_IPS empty — all networks allowed)");
+    }
   });
 
   cleanupExpiredShares();

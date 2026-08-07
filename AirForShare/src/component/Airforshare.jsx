@@ -14,7 +14,7 @@ function formatBytes(bytes) {
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024 // 10GB
 const MAX_UPLOAD_LABEL = '10GB'
 
-const Airforshare = ({ onLogout }) => {
+const Airforshare = () => {
     const [text, setText] = useState('')
     const [sharedText, setSharedText] = useState('')
     const [files, setFiles] = useState([])
@@ -52,24 +52,19 @@ const Airforshare = ({ onLogout }) => {
     useEffect(() => {
         fetchShared()
 
-        // Ngrok free breaks Socket.IO in the browser — poll REST instead
-        const pollMs = usesNgrokApi() ? 3000 : 0
-        const interval = pollMs
-          ? setInterval(fetchShared, pollMs)
-          : null
+        // Poll when Socket.IO is unreliable (ngrok) or as a light backup on VPN
+        const pollMs = usesNgrokApi() ? 3000 : 3000
+        const interval = setInterval(fetchShared, pollMs)
 
         const socket = connectShareSocket({
             onUpdate: (data) => {
                 setSharedText(data?.text || '')
                 setFiles(data?.files || [])
             },
-            onAuthError: () => {
-                window.dispatchEvent(new Event('auth:logout'))
-            },
         })
 
         return () => {
-            if (interval) clearInterval(interval)
+            clearInterval(interval)
             socket.disconnect()
             uploadAbortRef.current?.abort()
         }
@@ -295,10 +290,6 @@ const Airforshare = ({ onLogout }) => {
                     </div>
                 </div>
             )}
-
-            <button type='button' className='logout-btn' onClick={onLogout}>
-                Logout
-            </button>
 
             <div className='container'>
                 <div className='content'>

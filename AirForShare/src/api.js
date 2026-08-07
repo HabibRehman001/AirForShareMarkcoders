@@ -81,18 +81,11 @@ function authHeaders(extra) {
 
 export async function authFetch(path, options = {}) {
   const headers = authHeaders(options.headers)
-  const res = await fetch(apiUrl(path), {
+  return fetch(apiUrl(path), {
     ...options,
     headers,
     credentials: 'include',
   })
-
-  if (res.status === 401 && path !== '/api/me' && path !== '/api/login') {
-    clearToken()
-    window.dispatchEvent(new Event('auth:logout'))
-  }
-
-  return res
 }
 
 /**
@@ -143,11 +136,6 @@ export async function uploadWithProgress(path, formData, onProgress, signal) {
     }
 
     const status = err?.response?.status
-    if (status === 401 && path !== '/api/me' && path !== '/api/login') {
-      clearToken()
-      window.dispatchEvent(new Event('auth:logout'))
-    }
-
     const message =
       err?.response?.data?.error ||
       err?.message ||
@@ -164,6 +152,29 @@ export async function checkAuth() {
     return Boolean(data.authenticated)
   } catch {
     return false
+  }
+}
+
+/** True when the API (ZeroTier / VPN path) is reachable from this device. */
+export async function checkVpnReachable(timeoutMs = 3500) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(apiUrl('/api/health'), {
+      method: 'GET',
+      credentials: 'include',
+      signal: ctrl.signal,
+      headers: {
+        ...(/ngrok/i.test(API_BASE) ? { 'ngrok-skip-browser-warning': 'true' } : {}),
+      },
+    })
+    if (!res.ok) return false
+    const data = await res.json().catch(() => ({}))
+    return Boolean(data.ok)
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -201,7 +212,6 @@ export function connectShareSocket({ onUpdate, onAuthError } = {}) {
     const { url, path } = getSocketTarget()
     shareSocket = io(url, {
       path,
-      auth: { token: getToken() },
       withCredentials: true,
       transports: ['polling', 'websocket'],
       autoConnect: true,
@@ -222,7 +232,7 @@ export function connectShareSocket({ onUpdate, onAuthError } = {}) {
 
   const handleConnectError = (err) => {
     const message = err?.message || ''
-    if (/auth/i.test(message) && typeof onAuthError === 'function') {
+    if (/auth|network/i.test(message) && typeof onAuthError === 'function') {
       onAuthError(err)
     }
   }
