@@ -1,0 +1,10 @@
+# Client example (real file: client.conf is gitignored)
+[Interface]
+PrivateKey = <client private key>
+Address = 10.8.0.2/24
+
+[Peer]
+PublicKey = <WIRE_GUARD_PUBLIC_KEY from server .env>
+Endpoint = <server-public-or-lan-ip>:51820
+AllowedIPs = 10.8.0.0/24
+PersistentKeepalive = 25

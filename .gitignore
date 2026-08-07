@@ -1,1 +1,16 @@
+# Secrets / local only
+.env
+*.ovpn
+
+# Legacy ZeroTier dump name
 localVPN/
+
+# WireGuard — track scripts + examples; ignore live keys/configs
+wireguard/wg0.conf
+wireguard/client.conf
+wireguard/client.keys
+wireguard/client.png
+wireguard/*.key
+
+# ZeroTierVpn folder is trackable; do not push upstream ZeroTier source (~236MB)
+ZeroTierVpn/ZeroTierOne/
